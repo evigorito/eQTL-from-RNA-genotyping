@@ -1074,7 +1074,7 @@ RNAvcf4rasqual_sub <- function(pattern,chr,pat2,samples,info,prefix) {
 
 ######## Input for RASQUAL using https://github.com/kauralasoo/rasqual/tree/master/rasqualTools
 
-# fsnp count per gene for rasqual input
+#' fsnp count per gene for rasqual input
 #'
 #' Takes snp coordinates to locate then withing genes
 #' @param x path to input files with snp coordinates, output from bash functions vcf4rasqual or vcf4rasqualg. Default is current directory
@@ -1102,7 +1102,9 @@ snp_coord <-  function(x=".",pat,exons, cis_window=5e5, out_path=".", prefix){
 }
 
 
-# format rasqual output
+
+#################### RASQUAL OUTPUT ######################
+#' format rasqual output
 #'
 #' Selects and format rasqual output
 #' @param x path to file with rasqual output
@@ -1138,13 +1140,41 @@ format_rasqual <-  function(x,top.hits=c("yes","no")) {
 
 }
 
+#' format rasqual output genome wide
+#'
+#' Selects and format rasqual output for many files
+#' @param x path to files with rasqual output
+#' @param pattern pattern to match input files
+#' @param top.hits whether to limit results to strongest associated snp per gene or not
+#' @param failed whether to return sub-list with rasqual output that failed the run, dafults to TRUE
+#' @keywords format rasqual output
+#' @export
+#' @return list with data tables with rasqual formatted output per input file, if failed=TRUE also a nested list with failed rasqual runs per chr (gene_id, Chrom, number of fSNPs and number of regSNPs
+#' format_rasqual_gw
+
+format_rasqual_gw <-  function(x,pattern ,top.hits=c("yes","no"), failed=TRUE){
+    setwd(x)
+    files <- list.files(pattern=pattern, full.names=T)
+    tmp <- lapply(files, function(i) format_rasqual(i,top.hits))
+    tmp2 <- lapply(tmp, function(i) i[rs_id !="SKIPPED",])
+    if(failed==TRUE){
+        f <- rbindlist(lapply(tmp, function(i) i[rs_id=="SKIPPED",.(gene_id,Chrom,f_SNPs,r_SNPs)]))
+        tmp3 <- list(successful_snps=tmp2,failed_snps=f)
+        return(tmp3)
+    } else {
+        return(tmp2)
+  
+}
+}
+
+
 #' rasqual merge dna and rna by FDR cut-off, add gene name and variant name from biomart
 #'
 #' Merges DNA and RNA genotyping results, select results based on FDR cut-off and adds gene name and rsid for variants according to biomart
 #' @param rasq_top_hit_dna rasqual output for dna genotyped, output from format_rasqual
 #' @param rasq_top_hit_rna rasqual output for rna genotyped, output from format_rasqual
 #' @param fdr false discovery rate cut-off, defaults to 0.1
-#' @param cols vector with columns to select from rasq_top_hit objects
+#' @param cols vector with columns to select from rasq_top_hit objects, defaults to all
 #' @param shape whether long or wide format is preferred, long format is the input for ras.table function
 #' @keywords compare_rasqual_DNA_RNA 
 #' @export
@@ -1158,29 +1188,54 @@ merge_format <- function(rasq_top_hit_dna,rasq_top_hit_rna,fdr=0.1,cols,shape=c(
     hits <- merge(rasq_top_hit_dna[FDR<=fdr,cols, with=FALSE],rasq_top_hit_rna[FDR<=fdr,cols,with=F], by="gene_id", suffixes=c(".DNA",".RNA"),all=TRUE)
     } else {
          hits <- merge(rasq_top_hit_dna[FDR<=fdr,],rasq_top_hit_rna[FDR<=fdr,], by="gene_id", suffixes=c(".DNA",".RNA"),all=TRUE)
+    }
+    if(dim(hits)[1]==0){
+        return(paste0("No hits at ",fdr," FDR, neither in DNA nor in RNA datasets for CHR ",unique(rasq_top_hit_rna$Chrom)))
         }
         # Add ensembl data
     mart <- useEnsembl(biomart="ensembl", GRCh="37",dataset="hsapiens_gene_ensembl")
     snp <-useEnsembl(biomart="snp", GRCh="37", dataset="hsapiens_snp")
 
     gene_name <- data.table(getBM(attributes=c("ensembl_gene_id", "external_gene_name"), filters=c("ensembl_gene_id"), values=hits$gene_id, mart=mart))
-    snp_pos <- data.table(pos=c(hits[!is.na(SNP_pos.DNA),SNP_pos.DNA], hits[!is.na(SNP_pos.RNA),SNP_pos.RNA]), chr=sub(":.*","", c(hits[!is.na(rs_id.DNA),rs_id.DNA], hits[!is.na(rs_id.RNA),rs_id.RNA])), allele=c(paste0(hits[!is.na(Ref.DNA),Ref.DNA], "/" ,hits[!is.na(Alt.DNA),Alt.DNA]),paste0(hits[!is.na(Ref.RNA),Ref.RNA], "/" ,hits[!is.na(Alt.RNA),Alt.RNA]) ))
+    
+    if(sum(!is.na(hits$SNP_pos.DNA))==0){
+        
+        snp_pos <-data.table(pos=c(hits[!is.na(SNP_pos.DNA),SNP_pos.DNA], hits[!is.na(SNP_pos.RNA),SNP_pos.RNA]), chr=sub(":.*","", c(hits[!is.na(rs_id.DNA),rs_id.DNA], hits[!is.na(rs_id.RNA),rs_id.RNA])), allele=paste0(hits[!is.na(Ref.RNA),Ref.RNA], "/" ,hits[!is.na(Alt.RNA),Alt.RNA]))
+        
+    } else if(sum(!is.na(hits$SNP_pos.RNA))==0){
+        snp_pos <- data.table(pos=c(hits[!is.na(SNP_pos.DNA),SNP_pos.DNA], hits[!is.na(SNP_pos.RNA),SNP_pos.RNA]), chr=sub(":.*","", c(hits[!is.na(rs_id.DNA),rs_id.DNA], hits[!is.na(rs_id.RNA),rs_id.RNA])), allele=paste0(hits[!is.na(Ref.DNA),Ref.DNA], "/" ,hits[!is.na(Alt.DNA),Alt.DNA]))
+
+        } else {
+    
+            snp_pos <- data.table(pos=c(hits[!is.na(SNP_pos.DNA),SNP_pos.DNA], hits[!is.na(SNP_pos.RNA),SNP_pos.RNA]), chr=sub(":.*","", c(hits[!is.na(rs_id.DNA),rs_id.DNA], hits[!is.na(rs_id.RNA),rs_id.RNA])), allele=c(paste0(hits[!is.na(Ref.DNA),Ref.DNA], "/" ,hits[!is.na(Alt.DNA),Alt.DNA]),paste0(hits[!is.na(Ref.RNA),Ref.RNA], "/" ,hits[!is.na(Alt.RNA),Alt.RNA])))
+
+        }
+ 
     
     snp_name <- rbindlist(lapply(1:nrow(snp_pos), function(i) data.table(getBM(attributes=c("refsnp_id", "chrom_start","allele"), filters=c("start","end","chr_name"), values=list(snp_pos[i,pos],snp_pos[i,pos],snp_pos[i,chr]),  mart=snp))))
     #check if same alleles in biomart and my data
+    snp_pos[,pos:=as.integer(pos)]
+    snp_name[,chrom_start:=as.integer(chrom_start)]
+
     snp_check <- merge(snp_pos,snp_name, by.x="pos", by.y="chrom_start", all.x=T)
     snp_check[,same:=allele.x==allele.y]
     #same_check <- snp_check[pos %in% hits[!is.na(SNP_pos.DNA),SNP_pos.DNA],same]
     for(i in hits[!is.na(SNP_pos.DNA),SNP_pos.DNA]){
-        if(snp_check[pos==i,same]==TRUE){
-            hits[SNP_pos.DNA==i, rs_id.DNA:=snp_check[pos==i,refsnp_id]]
+        if(length(snp_check[pos==i & same==TRUE,same])!=0){
+            if(unique(snp_check[pos==i & same==TRUE,same])==TRUE){
+                hits[SNP_pos.DNA==i, rs_id.DNA:=unique(snp_check[pos==i & same==TRUE,refsnp_id])]
+            }
         }
+        
     }
     for(i in hits[!is.na(SNP_pos.RNA),SNP_pos.RNA]){
-        if(snp_check[pos==i,same]==TRUE){
-            hits[SNP_pos.RNA==i, rs_id.RNA:=snp_check[pos==i,refsnp_id]]
+         if(length(snp_check[pos==i & same==TRUE,same])!=0){
+        if(unique(snp_check[pos==i & same==TRUE, same])==TRUE){
+            hits[SNP_pos.RNA==i, rs_id.RNA:=unique(snp_check[pos==i & same==TRUE,refsnp_id])]
         }
+         }
     }
+    
     hits <- merge(gene_name,hits, by.x="ensembl_gene_id", by.y="gene_id")
 
     setkey(hits, rs_id.DNA, rs_id.RNA)
@@ -1196,6 +1251,33 @@ merge_format <- function(rasq_top_hit_dna,rasq_top_hit_rna,fdr=0.1,cols,shape=c(
         return(hits)
 
     }
+}
+
+#' rasqual merge dna and rna GENOME WIDE by FDR cut-off, add gene name and variant name from biomart
+#'
+#' Merges DNA and RNA genotyping results, select results based on FDR cut-off and adds gene name and rsid for variants according to biomart
+#' @param rasq_top_hit_dna list with rasqual output for dna genotyped, output from format_rasqual_gw
+#' @param rasq_top_hit_rna list with rasqual output for rna genotyped, output from format_rasqual_gw
+#' @param fdr false discovery rate cut-off, defaults to 0.1
+#' @param cols vector with columns to select from rasq_top_hit objects, default to all
+#' @param shape whether long or wide format is preferred, long format is the input for ras.table function
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return list
+#' merge_format_gw
+
+merge_format_gw<- function(DNA_top_hits,RNA_top_hits,fdr=0.1,cols=NULL,shape=c("long","wide")){
+    if(is.null(cols)){
+        cols <- names(DNA_top_hits[[1]])
+        }
+    tmp <- lapply(seq_along(DNA_top_hits), function(i) merge_format(DNA_top_hits[[i]],RNA_top_hits[[i]], fdr, cols, shape))
+
+    #tmp <- list()
+    #for(i in seq_along(DNA_top_hits)){
+       # tmp[[i]] <-  merge_format(DNA_top_hits[[i]],RNA_top_hits[[i]], fdr, cols, shape)
+        #print(i)
+        #}   
+    return(tmp)
 }
 
 
@@ -1214,8 +1296,12 @@ merge_format <- function(rasq_top_hit_dna,rasq_top_hit_rna,fdr=0.1,cols,shape=c(
 
 complete_matches <- function(rasq_hits_dna, rasq_hits_rna,hits, shape="long"){
     h <- copy(hits)
-    dna <- aux("DNA", shape, h)
-    rna <- aux("RNA", shape, h)
+    if(is.null(dim(h))){
+        return(h)
+    }
+    
+    dna <- aux("DNA", shape, h,rasq_hits_dna,rasq_hits_rna)
+    rna <- aux("RNA", shape, h,rasq_hits_dna,rasq_hits_rna)
     temp <- rbind(dna,rna)
    
     if(shape!="long"){
@@ -1243,15 +1329,17 @@ complete_matches <- function(rasq_hits_dna, rasq_hits_rna,hits, shape="long"){
 #' subfunction for rasqual: complete rna or dna hits with dna or rna data respectively
 #'
 #' info for snps not significant in dna but sig in rna and viceversa. 
-#' @param m, whether genotyping is DNA or RNA based, default DNA
-#' @param shape, whether to return long or wide format
-#' @param hits, output from merge_format with shape ="long"
+#' @param m whether genotyping is DNA or RNA based, default DNA
+#' @param shape input shape of h 
+#' @param h, output from merge_format, dafault to  shape ="long"
+#' @param rasq_hits_dna rasqual output for dna genotyped, output from format_rasqual
+#' @param rasq_hits_rna rasqual output for rna genotyped, output from format_rasqual
 #' @keywords compare_rasqual_DNA_RNA 
 #' @export
 #' @return data table 
 #' aux
 
-aux <- function(m="DNA", shape, h){
+aux <- function(m="DNA", shape, h,rasq_hits_dna,rasq_hits_rna){
     o <- tolower(m)
     if(m=="DNA"){
         n="RNA"
@@ -1271,7 +1359,7 @@ aux <- function(m="DNA", shape, h){
     
     return(l)
     } else {
-
+        #print(names(h))
         temp1 <- h[Genotype==n & !is.na(rs_id),]
         temp1[,rs.id:=paste0(Chrom,":",SNP_pos)]
         l <- rbindlist(lapply(1:nrow(temp1), function(i) temp[gene_id==temp1$ensembl_gene_id[i] & rs_id==temp1$rs.id[i],]))
@@ -1282,17 +1370,68 @@ aux <- function(m="DNA", shape, h){
   } 
 
 
+
+#' rasqual: complete rna or dna hits with dna or rna data respectively, GENOME WIDE
+#'
+#' info for snps not significant in dna but sig in rna and viceversa. 
+#' @param DNA_hits list of rasqual output for dna genotyped, output from format_rasqual_gw
+#' @param RNA_hits rasqual output for rna genotyped, output from format_rasqual_gw
+#' @param Hits list output from merge_format_gw with shape="long" (using DNA_top and RNA_top as inputs)
+#' @param shape whether long or wide format is preferred, In wide format can only return the matches but not in the same table as the originals.
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return list of data tables 
+#' complete_matches_gw
+
+complete_matches_gw<- function(DNA, RNA,Hits, shape="long"){
+    tmp <- lapply(seq_along(DNA[[1]]), function(i) complete_matches(DNA[[1]][[i]],RNA[[1]][[i]],Hits[[i]],shape))
+    #exclude missing data tables from tmp
+    tmp2 <- tmp[-which(sapply(tmp,is.character)==TRUE)]
+    #identify rasqual failed runs
+    tmp2 <- complete_matches_aux(DNA,RNA,tmp2)
+    return(tmp)
+}
+
+#' rasqual: aux for complete rna or dna hits with dna or rna data respectively, GENOME WIDE
+#'
+#' Indicates whether the rasqual run failed, due to rasqual unable to process large number of SNPs
+#' @param DNA list of rasqual output for dna genotypes, output from format_rasqual_gw
+#' @param RNA rasqual output for rna genotypes, output from format_rasqual_gw
+#' @param tmp2 object from complete_matches_gw to format
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return tmp2 list indicating whether rasqual failed in snp_id column 
+#' complete_matches_aux
+
+complete_matches_aux<- function(DNA, RNA,tmp2){
+    geno <- c("DNA","RNA")
+    for(i in seq_along(tmp2)){
+        for(j in geno){
+             f <- which(tmp2[[i]][Genotype==j ,ensembl_gene_id] %in% get(j)[[2]][,gene_id])
+             m <- tmp2[[i]][Genotype==j,ensembl_gene_id][f]
+             if(length(m)==0){
+                 next}
+             tmp2[[i]][ensembl_gene_id %in% m & Genotype==j,rs_id:="rasqual.failed"]
+        }
+    }
+    return(tmp2)
+}
+
+        
+
 #' table with rasqual output
 #'
 #' make xtable to present rasqual output
 #' @param hits_f output from complete_matches with shape="long"
 #' @param cols name of the columns of hits_f to include in the table
+#' @param print whether to print the result or just return a formatted data table input
+#' @param shape whether longtable or sidewaystable
 #' @keywords compare_rasqual_DNA_RNA 
 #' @export
-#' @return xtable
+#' @return formatted data table optional to print a xtable
 #' ras.table
 
-ras.table <- function(hits_f, cols){
+ras.table <- function(hits_f, cols,print=TRUE,shape){
     h <- copy(hits_f)
     h <- h[,cols,with=F]
     s <- data.table(class=sapply(h,class))
@@ -1300,10 +1439,137 @@ ras.table <- function(hits_f, cols){
     names(h)[which(names(h)=="external_gene_name")] <- "Gene"
     names(h) <- gsub("Allele_freq", "AF", names(h))
     names(h) <- gsub("_quality", "_q", names(h))
-    t <- xtable(h)
-    print(xtable(h, display=c("d",s$type)),math.style.exponents = TRUE, NA.string="-",floating = TRUE, floating.environment = "sidewaystable", booktabs=TRUE, include.rownames=F)
+    if("Squared_correlation_prior_posterior_rSNP" %in% cols){
+        names(h) <- gsub("Squared_correlation_prior_posterior_rSNP","r2.pr.pst.rSNP",names(h))
+        }
+   
+    if(print==TRUE){
+        #formatting numbers as text and duplicating columns to keep numeric value
+        SDcols=names(h)[which(s$type=="g")]
+        SDcols2=names(h)[which(s$type=="d")]
+        h[,(paste0(SDcols,".f")):=lapply(.SD,function(i) formatC(i,digits=2,format="g")), .SDcols=SDcols]
+        h[,(paste0(SDcols2,".f")):=lapply(.SD,function(i) formatC(i,digits=2,format="d")), .SDcols=SDcols2]
+
+        tof <-  names(h)[-which(s$type %in% c("g","d"))]
+        
+        u <- h[,.N,by="Gene"]
+        for(i in u$Gene){
+            if (u[Gene==i,N]==2){
+                d <- which(duplicated(h[Gene==i,SNP]))
+                if(length(d)==1){
+                    if(sum(is.na(h[Gene==i,FDR]))==0){
+                        h[Gene==i , (tof):=lapply(.SD, function(j) paste0("\\textcolor{red}{\\textbf{",j,"}}")), .SDcols=tof]
+                        } else {
+                            h[Gene==i & FDR<0.1, (tof):=lapply(.SD, function(j) paste0("\\textbf{",j,"}")), .SDcols=tof]
+                        }
+                    }
+                if(length(d)==0) {
+                     if(sum(is.na(h[Gene==i,FDR]))==0){
+                         h[Gene==i , (tof):=lapply(.SD, function(j) paste0("\\textcolor{blue}{\\textbf{",j,"}}")), .SDcols=tof]
+                     } else {
+                         h[Gene==i & FDR<0.1, (tof):=lapply(.SD, function(j) paste0("\\textbf{",j,"}")), .SDcols=tof]
+                         
+                    }
+                }
+            }
+            
+            
+            if(u[Gene==i,N] %in% 3:4){
+                d <- which(duplicated(h[Gene==i,SNP]))
+                for(k in 1:length(d)){
+                    s <- h[Gene==i,SNP][d[k]]
+                    if(sum(is.na(h[Gene==i & SNP==s,FDR]))==0){
+                        h[Gene==i & SNP==s, (tof):=lapply(.SD, function(j) paste0("\\textcolor{red}{\\textbf{",j,"}}")), .SDcols=tof]
+                    } else {
+                        h[Gene==i & FDR<0.1, (tof):=lapply(.SD, function(j) paste0("\\textcolor{blue}{\\textbf{",j,"}}")), .SDcols=tof]
+                   
+
+                    }
+                }
+            }
+        }
+        h[,(SDcols):=NULL][,(SDcols2):=NULL]
+        names(h) <- gsub(".f","",names(h))
+        names(h) <- gsub("_",".",names(h))
+        #t <- xtable(h)
+        if(shape=="side"){print(xtable(h, NA.string="-",floating = TRUE, floating.environment = "sidewaystable", booktabs=TRUE, include.rownames=F))
+      
+              }
+        if(shape=="long"){
+            print(xtable(h), tabular.environment="longtable",size="small",floating=FALSE, include.rownames=FALSE, rotate.colnames = TRUE, sanitize.text.function=function(x) x)
+    } else {
+        return(h)
     }
+}
+}
+#print(xtable(h, NA.string="-",floating = TRUE, floating.environment = "sidewaystable", booktabs=TRUE, include.rownames=F)
+
+
+
+
     
+
+
+#' table with rasqual output genome wide
+#'
+#' make xtable to present rasqual output genome wide
+#' @param x list output from complete_matches_gw with shape="long"
+#' @param cols name of the columns of x[[1]] to include in the table
+#' @param print whether to get xtable output
+#' @param shape whether to return long or sideways tables
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return xtable
+#' ras.table_gw
+
+ras.table_gw <- function(x,cols,print=TRUE,shape=c("long","side")) {
+    #remove null elements (no hits at FDR for RNA or DNA)
+    x <- x[-which(lapply(lapply(x,nrow),is.null)==TRUE)]
+    lapply(x, function(i) ras.table(i,cols,print,shape))
+    #return(tmp)
+}
+
+#' summary of rasqual output genome wide
+#'
+#' summarize rasqual output in list, first element is a table with # of eQTL uniquely called in RNA or DNA and second element list of genes called in both
+#' @param x list output from complete_matches_gw with shape="long"
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return list with first element table of eQTL uniquely called in RNA or DNA and second element
+#' ras.summ_gw
+
+ras.summ_gw <- function(x){
+     #remove null elements (no hits at FDR for RNA or DNA)
+    x1 <- x[-which(lapply(lapply(x,nrow),is.null)==TRUE)]
+    x1 <- rbindlist(x1)
+    x2 <- x1[!is.na(FDR),]
+    x3 <- x2[,.N, by=external_gene_name]
+    x4 <- table(as.character(x2[external_gene_name %in% x3[N==1,external_gene_name],Genotype]))
+   return(list(eQTL.unique.DNAorRNA=x4, eQTL.both.DNA.RNA=x3[N==2,external_gene_name]))
+}
+
+#' save rasqual output genome wide
+#'
+#' save
+#' @param x list output from complete_matches_gw with shape="long"
+#' @param file path to file
+#' @keywords compare_rasqual_DNA_RNA 
+#' @export
+#' @return save csv
+#' ras.save_gw
+
+ras.save_gw <- function(x,file){
+     #remove null elements (no hits at FDR for RNA or DNA)
+    x1 <- x[-which(lapply(lapply(x,nrow),is.null)==TRUE)]
+    x1 <- rbindlist(x1)
+    write.csv(x1,file=file, row.names=F)
+}
+
+
+
+
+
+
     
 ###### QC of quantification using Kallisto ##########
 
@@ -1327,6 +1593,13 @@ f_path <- function(meta_data_file,path_q_files){
   samp_info[, path:=paste0(path_q_files,sample)]
   return(samp_info)
 }
+
+
+
+
+   
+
+
 
 #################  QC STAR #######################
 

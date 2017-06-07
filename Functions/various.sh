@@ -2,9 +2,9 @@
 
 
 # split gen file per chr for impt2 input
-
+# arg 1 path to gen file
 input_chr () {
-    # arg 1 path to gen file
+    
     for i in `seq 22`; do
        out=$(echo $1 | sed "s/gen//")
 	grep ^$i: $1  > $out$i.gen
@@ -290,10 +290,39 @@ vcf4rasqualg () {
     for i in `seq $NL`; do
 	input=$(awk "NR==$i" $2 | cut -d ' ' -f1)
 	output=$(awk "NR==$i" $2 | cut -d ' ' -f2)
-
 	bcftools query -f "$3" $input > $var/$output
 	bcftools query -f "$3" $input -H | head -1 > $var/header.$output
     done
 }
 
+
+#dealing with rasqual output
+
+#concatenate output files per chr: files starting with chr or chr.
+#arg1 path to files
+#arg2 first chr to extract
+#arg3 last chr to extract
+#arg4 pattern to match files ignoring chr number
+#arg5 suffix for output file
+
+conc_rasq (){
+    cd $1
+    chrs=`seq $2 $3`
+    files=$(ls | grep $4)
+    count=$(ls $files | head -1 |grep -E -o "chr[\\.]?" | wc -m) # distinguishes if files starts with chr[0-9] or chr.[0-9] by counting characters in that initial part of one of the file names. That is used to select the field number to sort by.
+
+    for i in $chrs; do
+	ordered_files=$(ls $files | grep -E "chr[\\.]?$i\\." | sort -t . -k $((count-2))n)
+	if [ -z "$ordered_files" ]
+	then
+	    continue
+	else
+	    cat $ordered_files > chr$i.$5
+	    #echo $((count-2))
+	    #echo chr$i.$5
+	fi
+	
+    done
+    
+    }
 
