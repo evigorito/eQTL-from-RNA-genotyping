@@ -7,6 +7,9 @@ library(dplyr)
 library(tidyr)
 library(parallel)
 library(rasqualTools)
+library(bigvis)
+library(hexbin)
+library(ggrepel)
 
 ######################## DNA ########################################
 
@@ -14,25 +17,32 @@ library(rasqualTools)
 #'
 #' This function allows you to get good format from vcf text.
 #' @param file file name with full path to vcf
+#' @param head path and file with header, defaults to prefix.header.txt
 #' @keywords vcf format
 #' @export
 #' @return named list with info from vcf files
 #' name()
-name <- function(file){
+name <- function(file, head=NULL){
     
     temp <- fread(file, sep='\t')
-    temp2 <- fread(paste0(gsub(".txt","",file),".header.txt"))
+    if(is.null(head)){
+        temp2 <- fread(paste0(gsub(".txt","",file),".header.txt"))
+    } else {
+        temp2 <- fread(head, sep="\t")
+    }
+    
     names(temp)<- gsub("^.*]","",names(temp2))
     names(temp)<-gsub(":","_", names(temp))
 
     return(temp)
-
+   
+        
 }
 
 #' extract info from vcf genome wide, one file per chr
 #'
 #' This function allows you to get good format from vcf text.
-#' @param path Path to files, defaul current dir
+#' @param path Path to files, default current dir
 #' @param pattern of files default=NULL
 #' @param name for each element of list (chr)
 #' @keywords vcf format
@@ -684,7 +694,7 @@ probs[,chr.pos.ref.alt:=paste(paste(CHROM,POS,sep=":"),REF, ALT, sep="_")]
     w<-which(gen.file$V1 %in% mer$V1)
     #wt<-which(mer$chr.pos.ref.alt %in% gen.file$V1)
     if(identical(gen.file$V1[w], mer$V1)==TRUE) {
-       #first sample is gen.file is in columns V6-V8.
+       #first sample in gen.file is in columns V6-V8.
         #samples in sam.file start in row 2
        n.sample=i-2
        cols=(n.sample*3+6):(n.sample*3+8)
@@ -700,6 +710,37 @@ probs[,chr.pos.ref.alt:=paste(paste(CHROM,POS,sep=":"),REF, ALT, sep="_")]
 }
  return(gen.file)
 }   
+
+#' open rna called variants in bzip imp2 format (gen.gz) and  remove genotypes with low dp
+#'
+#' This function allows you to: Remove genotypes called  with low depth in rna before imputation.
+#' @param file path to file to gen.gz to open. Also requires ".samples" file in same location. This is the vcf file after calling variants converted to imp2 format for ease.
+#' @param rna file extracted fro vcf after calling variants with GT and DP for each sample. output of open_select
+#' @param dt cut-off for depth read to use for removing genotypes
+#' @export
+#' @return data table with genotype replacements
+#' rem_genos ()
+
+rem_genos <- function(file,rna,dp){
+    gen.file <- fread(paste0("zcat ",file))
+    sam <- paste0(gsub("gen.gz","",file),"samples")
+    sam.file <- fread(sam)
+#V6-V8 in gen.file correspond to first sample in vcf.file.
+    	for(i in 2:nrow(sam.file)){
+            # for each sample select entries with DP=dp;
+            temp<-rna[get(paste0(sam.file[i,ID_1],"_DP"))==dp ,c(1:6,grep(sam.file[i, ID_1],names(rna))), with=F]
+	    # create ID for snp as in gen.file
+            temp[,V1:=paste0(CHROM,":",POS,"_",REF,"_",ALT)]
+            gen <- copy(gen.file)
+            #first sample in gen.file is in columns V6-V8.
+            #samples in sam.file start in row 2
+            n.sample=i-2
+            cols=(n.sample*3+6):(n.sample*3+8)
+            gen[V1 %in% temp$V1,paste0("V",cols):=rep(0,nrow(gen[V1 %in% temp$V1,]))]
+            }
+    return(gen)
+}
+
 
 
 #################  RNA imputed files ###############################
@@ -841,7 +882,7 @@ N_error_imp_sample <- function(imp_rna_dna_10){
 }
 
 
-#' Calculates number of errors DNA vs RNA, genome wide
+#' Calculates number of errors DNA vs RNA, mean and SD per chr, genome wide
 #'
 #' This function allows you to compute Concordance and 1 or 2 discrepancies between DNA and RNA called variants
 #' @param dna_imps list merging DNA with RNA data for a chr, output from imp_convert
@@ -859,6 +900,27 @@ N_error_imp_gw <- function(dna_imps){
         return(temp2)
 
 }
+
+#' Calculates number of errors DNA vs RNA, mean and SD per sample, genome wide
+#'
+#' This function allows you to compute Concordance and 1 or 2 discrepancies between DNA and RNA called variants
+#' @param dna_imps list merging DNA with RNA data for a chr, output from imp_convert
+#' @keywords imp2 DNA RNA errors
+#' @export
+#' @return data table comparing DNA with RNA
+#' N_error_imp_sample_gw
+
+N_error_imp_sample_gw <- function(dna_imps){
+    temp <- rbindlist(lapply(dna_imps, N_error_imp_sample))
+    tmp2 <- temp[,grep("N_errors",names(temp), value=T),with=F]
+    tmp3 <- lapply(names(tmp2), function(i) t(tmp2[,.N,by=get(i)])[2,])
+    tmp4 <- do.call(rbind,tmp3)
+    errors<-data.table(Errors=c(0,1,2), Mean=round(apply(tmp4,2,mean),0), SD=round(apply(tmp4,2,sd)))
+    errors[,Pct:=round(Mean*100/sum(Mean),2)]
+    return(errors)
+
+}
+
 
 ######################## Uncertanty in haplotypes ####################################
 
@@ -888,18 +950,17 @@ hap_un <- function(file){
 
 
 
-
 ####################### RASQUAL input  #############################################
 #' Function to prepare vcf from DNA files with GT:ASE and RSQ fields
 #'
 #' Format individual samples per chr with GT:AS and RSQ fields as required for vcf
-#' @param path path to tab files with GT info and ASE output
+#' @param path path to dir with tab files with GT info and ASE output
 #' @param pattern to match GT tab files
 #' @param chr vector with chr of interest
-#' @param path to file with R object containing a DNA list with each element corresponding to one chr, output from ann_vcf_list
+#' @param DNA path and name of file with R object containing a DNA list with each element corresponding to one chr, output from ann_vcf_list
 #' @keywords vcf for RASQUAL
 #' @export
-#' @return saves tab delimited files for RASQUAL input per sample per chr 
+#' @return saves tab delimited files in "path" for RASQUAL input per sample per chr 
 #' DNAvcf4rasqual
 
 DNAvcf4rasqual <- function(path,pattern,chr,DNA){
@@ -911,13 +972,13 @@ DNAvcf4rasqual <- function(path,pattern,chr,DNA){
 #' Subfunction to prepare vcf from DNA files with GT:ASE and RSQ fields
 #'
 #' Format individual samples per chr with GT:AS and RSQ fields as required for vcf
-#' @param path path to tab files with GT info and ASE output
+#' @param path path to dir with tab files with GT info and ASE output
 #' @param pattern to match GT tab files
 #' @param chr chromosome of interest
 #' @param DNA_f DNA data table with R2 information
 #' @keywords DNA format RASQUAL
 #' @export
-#' @return saves tab delimited file with RASQUAL formatted input per sample for specified chr
+#' @return saves tab delimited file in path's dir  with RASQUAL formatted input per sample for specified chr
 #' DNAvcf4rasqual_sub
 
 DNAvcf4rasqual_sub <- function(path,pattern,chr,DNA_f) {
@@ -933,9 +994,12 @@ DNAvcf4rasqual_sub <- function(path,pattern,chr,DNA_f) {
     names(AS) <- names(tabs)
     tabs_AS <- lapply(seq_along(tabs), function(i) merge(tabs[[i]], AS[[i]], by.x=paste0("V",c(1:2,4:5)), by.y=c("contig","position","refAllele","altAllele"), all.x=T))  
      #format
-    for(i in 1:length(tabs_AS)) {
+     for(i in 1:length(tabs_AS)) {
         #replace NA with 0
-        tabs_AS[[i]][is.na(refCount), refCount:=0][is.na(altCount),altCount:=0]
+        tabs_AS[[i]][is.na(refCount), refCount:=0][is.na(altCount),altCount:=0][is.na(totalCount),totalCount:=0]
+#### correction ### if V9 is 1|0, swap refCount with altCount #######
+        tabs_AS[[i]][V9=="1|0", refCount:=altCount]
+        tabs_AS[[i]][V9=="1|0", altCount:=totalCount-altCount]
         # merge refCount with altCount
         tabs_AS[[i]][,GT:=rep("GT:AS",nrow(tabs_AS[[i]]))]
         tabs_AS[[i]][,V9:=paste0(V9,":",refCount,",",altCount)]
@@ -1017,21 +1081,20 @@ RNAvcf4rasqual_sub <- function(pattern,chr,pat2,samples,info,prefix) {
     u <- unlist(strsplit(f_chr,"\\."))
     names(AS) <- u[which(u %in% samples)]
     #format AS
-
     AS <- lapply(seq_along(AS),function(i) AS[[i]][,GT:=paste0(refCount,",",altCount)][,c('refCount', 'altCount', 'totalCount'):=NULL])
     names(AS) <- u[which(u %in% samples)]
     AS <- rbindlist(AS, idcol="sample") 
 
     #wide
     setkey(AS,variantID)
-    AS2 <- dcast(AS, contig + position + variantID + refAllele + altAllele ~ sample, value.var="GT")
+    AS2 <- dcast(AS, contig + position + variantID + refAllele + altAllele   ~ sample, value.var="GT")
 
     #checking each row has at least 1 value that !is.na
     fun <- function(x){sum(!is.na(x))}
     s <- apply(AS2[,6:ncol(AS2)], 1, fun)
-    if(sum(s==0)!=0)
+    if(sum(s==0)!=0){
         stop("missing values for AS for all samples in at least one variant")
-
+}
     #replace NA with 0,0
     AS2[is.na(AS2)] <- "0,0"
 
@@ -1041,9 +1104,17 @@ RNAvcf4rasqual_sub <- function(pattern,chr,pat2,samples,info,prefix) {
 
     # Join GT with AS:
     u <- unique(AS$sample)
+############# CORRECTION: IF GT== 1|0, invert AS field ########################
+    ############### AS field is 0,0 for GT==0|0 or 1|1 ########
     for(i in u){
         col <- paste0(i,"_GT")
-        AS_GT[,(col):=paste0(get(col),":",get(i))]
+        AS_GT[get(col)!="1|0",(col):=paste0(get(col),":",get(i))]
+        ## invert ##
+        swap <- AS_GT[get(col)=="1|0",get(i)]
+        st <- strsplit(swap,",")
+        tmp <- lapply(st, function(i) paste0(i[[2]],",",i[[1]]))
+        tmp2 <- paste0("1|0:", unlist(tmp))
+        AS_GT[get(col)=="1|0",(col):=tmp2]
     }
     #remove cols
     AS_GT[,c("variantID",u):=NULL]
@@ -1070,6 +1141,63 @@ RNAvcf4rasqual_sub <- function(pattern,chr,pat2,samples,info,prefix) {
 
     write.table(AS_GT_i, file=paste0(path,"/",prefix,".",chr,".for.AS.tab"),row.names=F, col.names=F, quote=F, sep="\t")
 
+}
+
+
+
+#' Function to prepare hybrid vcf combining fSNPs from DNA/RNA and rSNPs from RNA/DNA
+#'
+#' Use to understand inconsistencies in RASQUAL output
+#' @param fsnp vector with fsnps id (CHROM:POS)
+#' @param rsnp vector with rsnps id (CHROM:POS)
+#' @param DNA DNA GT and AS info for all samples extracted from vcf (ie /mrc-bsu/scratch/ev250/Cincinatti/quant/ASE/DNA/chr1.ASE.allsamples.txt)
+#' @param RNA RNA GT and AS info for all samples extracted from vcf (ie /mrc-bsu/scratch/ev250/Cincinatti/quant/RASQUAL/input/21samples.1.prob.phased.with.ref.rna.ASE.compareDNA.txt)
+#' @keywords hybrid-vcf for RASQUAL
+#' @export
+#' @return list of hybrid data tables formatted for vcf
+#' hybridvcf4rasqual
+#'
+hybridvcf4rasqual <- function(fsnp,rsnp,DNA,RNA){
+    DNA_f <- DNA[ID %in% fsnp,]
+    RNA_f <- RNA[ID %in% fsnp,]
+    DNA_r <- DNA[ID %in% rsnp,]
+    RNA_r <- RNA[ID %in% rsnp,]
+    ## make hybrids
+    DNAf_RNAr <- rbind(DNA_f,RNA_r); setkey(DNAf_RNAr,CHROM,POS)
+    RNAf_DNAr <- rbind(RNA_f,DNA_r); setkey(RNAf_DNAr,CHROM,POS)
+    # format as vcf: add QUAL and FILTER 
+    hyb <- list(DNAf_RNAr,RNAf_DNAr)
+    tmp <- lapply(hyb, hybridvcf4rasqual_aux)
+    names(tmp) <- c("DNAf_RNAr","RNAf_DNAr")
+    return(tmp)
+    
+}
+
+#' Aux function to prepare hybrid vcf combining fSNPs from DNA/RNA and rSNPs from RNA/DNA
+#'
+#' Use to understand inconsistencies in RASQUAL output
+#' @param hybrid hybrid data table to format as vcf
+#' @keywords hybrid-vcf for RASQUAL
+#' @export
+#' @return data table formatted for vcf 
+#' hybridvcf4rasqual_aux
+#'
+hybridvcf4rasqual_aux<- function(hybrid){
+    #add QUAL and FILTER
+    h <- copy(hybrid)
+    h[,QUAL:="."][,FILTER:="PASS"]
+    # format as vcf: RSQ, GT, AS
+    h[,RSQ:=paste0("RSQ=",RSQ)]
+    GT.cols <- grep("_GT", names(h),value=T)
+    AS.cols <- grep("_AS", names(h),value=T)
+    for( i in 1:length(GT.cols)){
+        h[,(GT.cols[i]):=paste0(get(GT.cols[i]),":",get(AS.cols[i]))]
+        }
+    h[,(AS.cols):=NULL]
+    h[,GT.AS:="GT:AS"]
+    #order cols
+    setcolorder(h,c(names(hybrid)[1:5],"QUAL","FILTER","RSQ","GT.AS",GT.cols))
+    return(h)
 }
 
 ######## Input for RASQUAL using https://github.com/kauralasoo/rasqual/tree/master/rasqualTools
@@ -1167,6 +1295,247 @@ format_rasqual_gw <-  function(x,pattern ,top.hits=c("yes","no"), failed=TRUE){
 }
 }
 
+#' Select common gene-SNP pairs between DNA and RNA and format table
+#'
+#' Selects Select common gene-SNP pairs between DNA and RNA, adds log10pvalue for RNA and DNA. Optional to add count transcript information and gene names using biomart.
+#' @param x list of DNA rasqual output, element 1 from format_rasqual_gw with top.hits="no" and failed=TRUE)
+#' @param y list of RNA rasqual output, element 1 from format_rasqual_gw with top.hits="no" and failed=TRUE)
+#' @param counts file path and name to count table (matrix prepared in input_4-rasqual.R)
+#' @param plot path and file name including extension (ie .png)to save plot or FALSE for not plot, dafault is false
+#' @keywords select gene-SNP rasqual output
+#' @export
+#' @return data table with rasqual output for common pairs gene_SNP
+#' common_pairs
+
+common_pairs <-  function(x,y,counts,plot=FALSE){
+    dna <- rbindlist(x)
+    rna <- rbindlist(y)
+    m <- merge(dna,rna, by=c("gene_id","rs_id","Chrom","SNP_pos","Ref","Alt"),suffixes=c(".DNA",".RNA"))
+    counts <- fread(counts)
+    counts[,log10_mean_counts:= log10(apply(counts[,2:ncol(counts), with=F] ,1,mean))]
+    mart <-useMart(biomart="ENSEMBL_MART_ENSEMBL", host="grch37.ensembl.org", path="/biomart/martservice" ,dataset="hsapiens_gene_ensembl")
+    gene_name<- getBM(attributes=c("ensembl_gene_id",  "external_gene_name"), filters=c("ensembl_gene_id"), values=counts$V1, mart=mart)
+    counts <- merge(gene_name,counts, by.x="ensembl_gene_id", by.y="V1", all.y=T)
+    tmp <- merge(m, counts[,c("ensembl_gene_id","external_gene_name","log10_mean_counts")], by.x="gene_id",by.y="ensembl_gene_id", all.x=T)
+    tmp[,minuslog10p.DNA:=-log10(p.DNA)]
+    tmp[,minuslog10p.RNA:=-log10(p.RNA)]
+    
+    if(plot!=FALSE){
+        common_plot(tmp,c("Fold_change.DNA","Fold_change.RNA"),plot)
+       # binned <- with(m,condense(bin(Fold_change.DNA),bin(Fold_change.RNA)))
+       # g <- ggplot(binned, aes(x=Fold_change.DNA,y=Fold_change.RNA)) + geom_point(alpha=0.3) + scale_x_log10() + scale_y_log10() + annotate("text",x=0.1, y=10, label=paste0("correlation=",round(cor(m$Fold_change.DNA,m$Fold_change.RNA),2))) + theme_bw()
+        #ggsave(filename=plot,plot=g)
+        }
+    return(tmp)
+
+}
+
+
+
+#' Plot correlation of effect size DNA RNA
+#'
+#' plot correlation of effect size DNA RNA from rasqual output
+#' @param x output from common_pairs
+#' @param vars vector with name of variables to plot
+#' @param geom_hex whether to plot geom_hex, dafault is geom_point
+#' @param geom_smooth whehter to add regression line
+#' @param color variable to color points
+#' @param legend legend title for color variable
+#' @param label labels for scatter points in plot
+#' @param filename path and file name with extension to save plot, dafault null
+#' @param text additional text to add to plot
+#' @param logscale log10scale for x and y axis, default is true
+#' @param pos numeric vector with position for additional text (x,y)
+#' @param xl xlim argument for ggplot, vector with limits,ie xl=xlim(x,y)
+#' @param yl ylim argument for ggplot, vector with limits, ie yl=ylim(x,y)
+#' @keywords plot correlation effect size rasqual output
+#' @export
+#' @return save plot
+#' common_plot
+
+common_plot <-  function(x,vars,color=NULL,legend=NULL,label=NULL,filename=NULL,text=NULL,pos=NULL,logscale=NULL,xl=NULL, yl=NULL, geom_hex=NULL,geom_smooth=NULL) {
+    
+    if(nrow(x)>=1e05){#too many points to plot, bin
+        x <- data.table(with(x,condense(bin(get(vars[1])),bin(get(vars[2])))))
+        names(x)[1:2] <- vars
+    }
+     
+    if(!is.null(color)){
+        
+        g <- ggplot(x, aes(x=get(vars[1]),y=get(vars[2]), color=get(color))) + labs(color=legend)
+    } else {
+        g <-  ggplot(x, aes(x=get(vars[1]),y=get(vars[2])))
+    }
+        
+    if(!is.null(label)){
+        
+        g <-  g + geom_text_repel(aes(label=unlist(x[,label,with=F])), size=3)
+    }
+
+    if(!is.null(geom_hex)){
+        g <- g + geom_hex()
+    } else{
+        g <-g + geom_point(alpha=0.3)
+    }
+    if(is.null(logscale)){
+       
+        g <- g +  scale_x_log10() + scale_y_log10()
+    }
+    if(!is.null(geom_smooth)){
+        g <- g + geom_smooth(method=lm)
+    }
+    
+    if(!is.null(text)){
+        lab <- paste0(paste0("correlation=" , round(cor(unlist(x[,vars[1],with=F]),unlist(x[,vars[2],with=F])),2) ),"\n",text)
+        if(is.null(pos)){
+            g <- g + annotate("text",x=as.vector(min(unlist(x[,vars[1],with=F]))*1.5),  y=as.vector(max(unlist(x[,vars[2],with=F])))/3, label=lab,hjust=0) + xlab(vars[1]) + ylab(vars[2]) +theme_bw()
+        } else {
+             g <- g + annotate("text",x=pos[1],  y=pos[2], label=lab,hjust=0)   + xlab(vars[1]) + ylab(vars[2]) +theme_bw()
+        }
+    } else {
+        g <- g + annotate("text",x=as.vector(min(unlist(x[,vars[1],with=F]))*2), y=as.vector(max(unlist(x[,vars[2],with=F]))-1), label=paste0("correlation=" , round(cor(unlist(x[,vars[1],with=F]),unlist(x[,vars[2],with=F])),2) ) , hjust=0) + xlab(vars[1]) + ylab(vars[2]) +theme_bw()
+    }
+    if(!is.null(xl)){
+        g <- g + xl
+    }
+    if(!is.null(yl)){
+        g <- g + yl
+    }
+    g <- g + geom_hline(yintercept=1, linetype="dashed", 
+                color = "black", size=0.2) +geom_vline(xintercept=1, linetype="dashed", 
+                color = "black", size=0.2)
+    
+    if(is.null(filename)){
+        return(g)
+        } else {
+            ggsave(filename,plot=g)
+            }
+        
+}
+
+
+#' Add genotype consistency (ignoring phasing) column to an output of common_pairs function
+#'
+#' data table with extra column assessing DNA vs RNA genotype consistency
+#' @param x output from common_pairs
+#' @param y DNA genotype info, object output from name. Example input file for name:/mrc-bsu/scratch/ev250/Cincinatti/quant/ASE/DNA/chrN.ASE.allsamples.txt
+#' @param z RNA genotype info, object output from name. Example input file for name:/mrc-bsu/scratch/ev250/Cincinatti/quant/ASE/RNA/prob.phased.with.ref.rna.N.for.AS.tab
+#' @param concordance whether to express concordance by sample or by SNP
+#' @keywords genotype concordance rasqual output
+#' @export
+#' @return data table with % of genotyping concordance ignoring phasing
+#' geno_conc
+
+geno_conc <- function(x,y,z,concordance=c("sample", "SNP")){
+    if(sum(names(y)[1:3]== c("chr"  ,   "pos"  ,   "snp_id"))==3){
+        names(y)[1:3] <- names(z)[1:3] <-c("CHROM","POS","ID")
+    }
+    
+    tmp <- merge(y, z, by=c("CHROM","POS","ID","REF","ALT"), suffixes=c(".DNA", ".RNA"))
+    x[,id:=paste(Chrom,SNP_pos,Ref,Alt, sep=".")]
+    tmp[, id:=paste(CHROM,POS,REF,ALT, sep=".")]
+    tmp2 <- tmp[id %in% x$id,]
+    # get GT columns
+    GT.cols <- grep("_GT.", names(tmp), value=T)
+    # test genotype consistency
+    tmp3 <- tmp2[,GT.cols,with=F]
+    
+    tmp4 <- c()
+    tmp5 <- as.data.table(matrix(NA,nrow=nrow(tmp3), ncol=length(GT.cols)/2))
+    for( i in 1:(length(GT.cols)/2)){
+        hets <- which(tmp3[,i,with=F]=="0|1" | tmp3[,i,with=F]=="1|0")
+        # invert hets
+        s <- strsplit(tmp3[hets,get(names(tmp3)[i])], "|")
+        inv.hets <- sapply(s, function(i) paste0(i[[3]], i[[2]],i[[1]]))
+        #create vector of length nrow(tmp3) with inverted hets in the het positions and 0 otherwise
+        inv.hets.full <- rep(0,nrow(tmp3))
+        inv.hets.full[hets] <- inv.hets
+        # calculate concordance without phasing by sample
+        if(concordance=="sample"){
+            tmp4 <-c(tmp4, sum(tmp3[,i,with=F]==tmp3[,i+length(GT.cols)/2,with=F])+sum(inv.hets==unlist(tmp3[hets,i+length(GT.cols)/2,with=F])))
+        }
+        # calculate concordance without phasing by SNP
+        if(concordance=="SNP"){
+            if(length(inv.hets)>0){
+                tmp5[,i] <- as.vector(tmp3[,i,with=F]==tmp3[,i+length(GT.cols)/2,with=F]) + as.vector(inv.hets.full==unlist(tmp3[,i+length(GT.cols)/2,with=F]))
+            } else {
+                tmp5[,i] <- tmp3[,i,with=F]==tmp3[,i+length(GT.cols)/2,with=F]
+            }
+        }    
+        
+        
+    }
+
+    tmp5 <-data.table(id=tmp2$id,DNA.RNA.concordance=rowSums(tmp5)*100/ncol(tmp5))
+    tmp4 <- tmp4*100/nrow(tmp3)
+    if(concordance=="sample"){
+        samples <- gsub("_.*","",grep("DNA",GT.cols,value=T))
+        DT <- data.table(samples=samples, DNA.RNA.concordance=tmp4)
+        return(DT)
+        } else {
+            
+    k <- merge(x, tmp5,by="id", all.x=T)
+    return(k)
+        }
+    
+}
+
+
+#' Summary of variables for rasqual output 
+#'
+#' Summary statistics for rasqual output variables stratified by p-value.
+#' @param x vars prefix
+#' @param suffix vars suffix
+#' @param l list of objects to prepare summary, output from common_pairs
+#' @keywords summary stats rasqual output
+#' @export
+#' @return data table with summary data
+#' summary_stats_rasq
+
+summary_stats_rasq<-  function(x,suffix,l) {
+   sum <- list()
+for(i in vars){
+    tmp <- data.table(NULL)
+    for(j in seq_along(l)){
+        for(k in suf){
+            temp <- data.table(rbind(summary(unlist(l[[j]][,paste0(i,k), with=F]))))
+            temp[,Var:=paste0(names(l)[[j]],".",i,k)]
+            tmp <- data.table(rbind(tmp, temp))
+        }
+    }
+    sum[[i]] <- tmp
+}
+   return(rbindlist(sum, fill=T))
+}
+
+#' Histograms of variables for rasqual output stratified by RNA/DNA and variable
+#'
+#' Plot histogram for rasqual output variables stratified by RNA/DNA for each variable selected
+#' @param x vars prefix
+#' @param suffix vars suffix
+#' @param l list of objects to prepare summary, output from common_pairs
+#' @keywords summary stats rasqual output
+#' @export
+#' @return list of histograms
+#' hists_rasq
+
+hists_rasq<-  function(x,suffix,l) {
+    l_long <- rbindlist(l,id=T)
+    plots5 <- list()
+    for(i in seq_along(vars)){
+        tmp <- melt(l_long[,c(".id",paste0(vars[i],suf)), with=F], id.vars=".id")
+        tmp$cond <- paste0(tmp$.id,"_",tmp$variable)
+        plots5[[i]] <- ggplot(tmp, aes(x=value, colour=cond)) + geom_density()
+        names(plots5)[[i]] <- vars[i]
+    
+    }
+    return(plots5)
+}
+
+
+
+
+
 
 #' rasqual merge dna and rna by FDR cut-off, add gene name and variant name from biomart
 #'
@@ -1178,7 +1547,7 @@ format_rasqual_gw <-  function(x,pattern ,top.hits=c("yes","no"), failed=TRUE){
 #' @param shape whether long or wide format is preferred, long format is the input for ras.table function
 #' @keywords compare_rasqual_DNA_RNA 
 #' @export
-#' @return data table 
+#' @return data table with NA when no eQTL at the FDR cut-off was found.
 #' merge_format
 
 merge_format <- function(rasq_top_hit_dna,rasq_top_hit_rna,fdr=0.1,cols,shape=c("long","wide")){
@@ -1766,3 +2135,497 @@ combine_qc <- function(files.p,files.r,xtable=TRUE){
     }
  return(summ_w)
 }
+
+#####################################################################
+##### TROUBLESHOOTING RASQUAL OUTPUT ######################
+
+#' Select longest exons for one gene
+#'
+#' @param exon_pos Data frame with exons (required columns: gene_id, chr, start, end)for one gene only
+#'
+#' @return Data table with ordered longest exons for a gene
+#' @export
+longest.exons <- function(exon_pos){
+    exon_st <- as.numeric(unlist(strsplit(exon_pos$exon_starts, ",")))
+    exon_end <- as.numeric(unlist(strsplit(exon_pos$exon_ends, ",")))
+    tmp <-  data.table(exon_starts=exon_st, exon_ends=exon_end)
+    # Select longest exons
+    setkey(tmp,exon_starts,exon_ends)
+    tmp <- tmp[, .SD[.N], by=exon_starts][,.SD[1], by=exon_ends]
+    tmp[,gene_id:=exon_pos$gene_id]
+    tmp[,chr:=exon_pos$chr]
+    tmp[,strand:=exon_pos$strand]
+    setcolorder(tmp,names(exon_pos))
+    return(tmp)
+}
+
+
+
+# FUNCTION TO get fSNPs for one gene
+
+#' Identifies feature SNPs (and cis SNPs, not yet) overlapping a set of exons. First select longest exons for one gene
+#'
+#' @param exon_pos Data frame with exons (required columns: gene_id, chr, start, end)for one gene only
+#' @param snp_coords Data frame with SNP coordinates (required columns: chr, pos, snp_id)
+#' @param cis_window Size of the cis window from both sides of the gene.
+#'
+#' @return Data table with fSNPS
+#' @export
+get.f.Snps <- function(exon_pos, snp_coords){
+    tmp <- longest.exons(exon_pos)
+    #get SNPs within exons (fSNP column Yes or No) outside of coding is "No"
+    tmp2 <- copy(snp_coords)
+    setkey(tmp2,chr,pos)
+    tmp2[,fSNP:="No"]
+    
+    #For those in exons change to "Yes"
+    for(k in 1:nrow(tmp)){
+        tmp2[pos >=tmp$exon_starts[k]& pos<=tmp$exon_ends[k], fSNP:="Yes"]
+        }
+   
+    return(tmp2)
+}
+
+
+
+##########################
+# FROM KAUR rasqual tools
+
+
+#' Count the number of feature SNPs and cis SNPs overlapping exons of all genes
+#'
+#' @param gene_metadata Data frame with gene metadata (required columns: gene_id, chr, strand, exon_starts, exon_ends)
+#' -exon_stars: comma-separated list of exon start coordinates
+#' -exon_ends: comma-separated list of exon end coordinates.
+#' @param snp_coords Data frame with SNP coordinates from a VCF file (required columns: chr, pos, snp_id)
+#' @param cis_window Size of the cis window from both sides of the gene.
+#'
+#' @return Data frame with exon coordinates, cis region coordiantes as well as the number of cis and feature snps.
+#' @export
+#' @importFrom magrittr "%>%"
+countSnpsOverlapingExons2 <- function(gene_metadata, snp_coords, cis_window = 5e5, return_fSNPs = FALSE){
+  
+  #Check that all required columns exist in the input data
+  assertthat::assert_that(assertthat::has_name(gene_metadata, "gene_id"))
+  assertthat::assert_that(assertthat::has_name(gene_metadata, "chr"))
+  assertthat::assert_that(assertthat::has_name(gene_metadata, "strand"))
+  assertthat::assert_that(assertthat::has_name(gene_metadata, "exon_starts"))
+  assertthat::assert_that(assertthat::has_name(gene_metadata, "exon_ends"))
+  
+  assertthat::assert_that(assertthat::has_name(snp_coords, "chr"))
+  assertthat::assert_that(assertthat::has_name(snp_coords, "pos"))
+  assertthat::assert_that(assertthat::has_name(snp_coords, "snp_id"))
+
+  #Split exon coordinates into separate rows
+  gene_df_list = plyr::dlply(gene_metadata, plyr::.(gene_id), function(x){
+    data.frame(gene_id = x$gene_id, 
+               seqnames = x$chr,
+               strand = x$strand,
+               start = as.numeric(unlist(strsplit(x$exon_starts,","))),
+               end = as.numeric(unlist(strsplit(x$exon_ends,","))) )
+  })
+  exon_df = plyr::ldply(gene_df_list, .id = NULL) %>% dplyr::tbl_df()
+  
+  #Counts the number of feature SNPs
+  exon_granges = dataFrameToGRanges(exon_df)
+  snp_granges = GenomicRanges::GRanges(seqnames = snp_coords$chr, 
+                                       ranges = IRanges::IRanges(start = snp_coords$pos, end = snp_coords$pos))
+  n_feature_snps = GenomicRanges::countOverlaps(exon_granges, snp_granges, ignore.strand=TRUE)
+  feature_snp_df = dplyr::mutate(exon_df, feature_snp_count = n_feature_snps) %>% 
+    dplyr::group_by(gene_id) %>% 
+    dplyr::summarise(seqnames = seqnames[1], strand = strand[1], start = min(start), end = max(end), 
+                     feature_snp_count = sum(feature_snp_count))
+  
+  #Find ids of feature SNPs
+  if (return_fSNPs){
+    feature_olaps = GenomicRanges::findOverlaps(exon_granges, snp_granges, ignore.strand=TRUE)
+    #feature_snps = snp_granges[subjectHits(feature_olaps)]
+    feature_snps = snp_granges[as.data.frame(feature_olaps)[[2]]]
+    #subjectHits(x): Equivalent to as.data.frame(x)[[2]]
+    return(feature_olaps)
+  }
+  
+  #Count the number of cis SNPs
+  cis_df = dplyr::mutate(feature_snp_df, start = pmax(0, start - cis_window), end = end + cis_window)
+  cis_granges = dataFrameToGRanges(cis_df)
+  n_cis_snps = GenomicRanges::countOverlaps(cis_granges, snp_granges, ignore.strand=TRUE)
+  result = dplyr::mutate(cis_df, cis_snp_count = n_cis_snps, gene_id = as.character(gene_id)) %>%
+    dplyr::rename(range_start = start, range_end = end)
+  
+  #Add exon start and end coords and reorder columns
+  start_end_df = dplyr::select(gene_metadata, gene_id, exon_starts, exon_ends)
+  result = dplyr::left_join(result, start_end_df, by = "gene_id") %>%
+    dplyr::transmute(gene_id, chromosome_name = seqnames, strand, exon_starts, exon_ends, 
+                     range_start, range_end, feature_snp_count, cis_snp_count)
+  return(result)
+}
+##########################
+
+#' Prepare exon info for countSnpsOverlapingExons, get longest exon per gene when they are overlapping exons and format as required.
+#' 
+#' Format exon bouderies for countSnpsOverlapingExons
+#' @param x data table with exon start and end: example exons_all created in input_4_rasqual
+#' @keywords exon bouderies longest countSnpsOverlapingExons
+#' @export
+#' @return data table with formatted exon info for countSnpsOverlapingExons
+#' format_exons
+
+format_exons<- function(x){
+    y <- lapply(1:nrow(x), function(i) longest.exons(x[i,]))
+    z <- lapply(seq_along(y), function(i)  paste0(y[[i]]$exon_starts,collapse=","))
+    w <- lapply(seq_along(y), function(i) paste0(y[[i]]$exon_ends,collapse=","))
+    tmp <- copy(x)
+    tmp[,exon_starts:=unlist(z)]
+    tmp[,exon_ends:=unlist(w)]
+    return(tmp)
+}
+
+
+
+
+
+
+
+#' Compare genotype and ASE for fSNPs from DNA vs RNA
+#' 
+#' Assess DNA vs RNA genotype consistency and ASE
+#' @param y DNA genotype info and ASE, object output from get.f.Snps
+#' @param z RNA genotype info, and ASE, object output from get.f.Snps
+#' @keywords genotype concordance rasqual output
+#' @export
+#' @return genotyping ASE concordance
+#' geno_ase_concord
+
+geno_ase_concord <- function(y,z){
+    tmp <- merge(y, z, by=c("chr","pos","snp_id","REF","ALT"), suffixes=c(".DNA",".RNA"), all=TRUE)
+    tmp2 <- tmp[fSNP.DNA=="Yes" & fSNP.RNA=="Yes",]
+    #compare GT
+     # get GT columns
+    GT.cols <- grep("_GT.", names(tmp2), value=T)
+    # test genotype consistency
+    tmp3 <- geno_ase_concord_sub(tmp2,GT.cols)
+    x <- tmp2[,c("chr","pos","snp_id","REF","ALT"),with=F]
+    x[,Geno.consistency:=tmp3]
+    # test geno consistency for het individuals only
+    
+
+    # get AS cols
+    AS_cols <- grep("_AS.",names(tmp2), value=T)
+    tmp4 <- tmp2[,AS_cols,with=F]
+    tmp5 <- geno_ase_concord_sub(tmp4, AS_cols)
+    x[,AS.consistency:=tmp5]
+    return(x)
+
+}
+
+#' Compare columns within data table: aux for geno_ase_concord. Also compares consistency in genotyping and phasing of het entries between 2 columns (het argument)
+#' 
+#' Compare columns element by element and give % of concordance
+#' @param DT data table with columns to compare
+#' @param cols vector with column namess to compare
+#' @param hets check consistency in hets entries only
+#' @keywords genotype concordance rasqual output
+#' @export
+#' @return genotyping ASE concordance
+#' geno_ase_concord_sub
+
+geno_ase_concord_sub <- function(DT,cols, hets=NULL){
+    if(is.null(hets)){
+    tmp3 <- DT[,cols,with=F]
+    tmp4 <- as.data.table(matrix(NA,nrow=nrow(tmp3), ncol=length(cols)/2))
+    for( i in 1:(length(cols)/2)){
+    tmp4[,i] <- tmp3[,i,with=F]==tmp3[,i+length(cols)/2,with=F]
+    }
+    tmp5 <- rowSums(tmp4)*100/ncol(tmp4)
+    return(tmp5)
+    
+    } else {
+        
+        GTcols <- grep("_GT.", names(DT), value=T)
+        l <-length(GTcols)/2
+        hets <- data.table(`#Conc_no_ph`=rep(-1,l),`Conc_ph%`=rep(-1,l), DNA.hets=rep(-1,l),RNA.hets=rep(-1,l))
+        DTT <- DT[,GTcols,with=F]
+    for(i in 1:(length(GTcols)/2)){
+        a <- which(DTT[,i,with=F]=="0|1")
+        b <- which(DTT[,i+length(GTcols)/2,with=F]=="0|1")
+        c <-  which(DTT[,i,with=F]=="1|0")
+        d <- which(DTT[,i+length(GTcols)/2,with=F]=="1|0")
+        hets[i,':=' (`#Conc_no_ph`=sum(c(a,c) %in% c(b,d)), DNA.hets=length(a)+length(c),RNA.hets=length(b)+length(d))]
+        if(sum(a==b)!=0 | sum(c==d)!=0) {
+            conc=round((sum(a==b)+ sum(c==d))*100/(length(a)+length(b)+length(c)+length(d)),0)
+            hets[i,`Conc_ph%`:=conc]
+        } else {
+            hets[i,`Conc_ph%`:=0]
+        
+        }
+    }
+        
+        return(Colmeans(hets))
+    }
+    
+    
+        
+}
+
+
+
+#' Identify hets in wrong phase between DNA and RNA (called in swap_phase)
+#' 
+#' Give location in a data table for hets in wrong phase between DNA and RNA
+#' @param x data table with DNA geno info
+#' @param y data table with RNA geno info
+#' @keywords phase hets
+#' @export
+#' @return list with each element the sample name with the het positions swapped
+#' swapped_hets
+
+swapped_hets <- function(x,y){
+    DT <- merge(x,y,by=names(x)[1:4])
+    GTcols <- grep("_GT.", names(DT), value=T)
+    DTT <- DT[,GTcols,with=F]
+    swaps <- list()
+    l <-length(GTcols)/2
+    for(i in 1:l){
+        w <- which(DTT[,get(GTcols[i])]=="0|1" & DTT[,get(GTcols[i+l])=="1|0"])
+        w1 <- which(DTT[,get(GTcols[i])]=="1|0" & DTT[,get(GTcols[i+l])=="0|1"])
+        w3 <- c(w,w1)
+        if(length(w3)!=0){
+            swaps[[i]] <- w3
+            names(swaps)[[i]] <- gsub(".x","", GTcols[i])
+        }
+    }
+    swaps <- swaps[!sapply(swaps,is.null)]
+    return(swaps)
+        
+}
+
+#' Swap hets in opposite phase between DNA and RNA
+#' 
+#' Produce DT with swapped phase for hets 
+#' @param x data table with geno info to be swapped (same col and row order as y)
+#' @param y data table with geno info for template (same col and row order as y)
+#' @keywords swap phase hets
+#' @export
+#' @return DT with swapped phase
+#' swap_phase
+
+swap_phase<- function(x,y){
+    s.hets <- swapped_hets(x,y)
+    tmp <- copy(x)
+    for(i in seq_along(s.hets)){
+    repl <- y[s.hets[[i]],get(names(s.hets)[[i]])]
+    tmp[s.hets[[i]],(names(s.hets)[[i]]):=repl]
+    }
+    return(tmp)
+
+}
+
+           
+           
+
+#' Select common rSNPs from DNA vs RNA within cis window
+#' 
+#' Select common rSNPs to facilitate rasqual troubleshooting
+#' @param y DNA SNPs, object output from get.f.Snps
+#' @param z RNA SNPs, object output from get.f.Snps
+#' @param gene.id vector with ENSEMBL gene ids for rSNPs to retrieve 
+#' @param w data table with exon bounderies, output from format_exons
+#' @param cis cis-window, defaults 5e5
+#' @keywords common rSNPs
+#' @export
+#' @return data table with common entries
+#' common_rSNPs
+
+common_rSNPs<- function(y,z,w,gene.id,cis=5e5){
+    tmp <- merge(y, z, by=c("chr","pos","snp_id","REF","ALT"), suffixes=c(".DNA",".RNA"), all=TRUE)
+    tmp2 <- tmp[fSNP.DNA=="No" & fSNP.RNA=="No",]
+    #filter by cis window
+    w[,gene.st:=as.numeric(sub(",.*","",exon_starts))]
+    w[,gene.end:=as.numeric(gsub(".*,","",exon_ends))]
+    tmp3 <- lapply(seq_along(gene.id), function (i) {
+        j <- which(w$gene_id==gene.id[i])
+                   tmp2[pos>=w$gene.st[j]-cis & pos<=w$gene.end[j] + cis, ]                  
+        })
+        names(tmp3) <- gene.id
+        tmp4 <- rbindlist(tmp3,idcol="gene_id")
+    return(tmp4)
+}
+
+#' Sum AS counts per haplotype per individual
+#' 
+#' Sum AS counts per haplotype per individual to facilitate rasqual troubleshooting
+#' @param x output from get.f.Snps with fSNPs to sum over
+#' @param y genotype of rSNPs in same samples
+#' @param counts count data table for gene of interest with samples in same order as x and y
+#' @keywords summing AS fSNP
+#' @export
+#' @return data table with common entries
+#' sum.as_fSNPs
+
+sum.as_fSNPs <- function(x,y=NULL,counts=NULL){
+    as <- grep("_AS",names(x), value=T)
+    tmp <- x[,as,with=F]
+    tmp2 <- apply(tmp,2, function(i) as.numeric(unlist(strsplit(i, ","))))
+    
+    DT <- data.table(samples=gsub("_AS","",as),hap.a=colSums(tmp2[seq(1,nrow(tmp2),by=2),]),hap.b=colSums(tmp2[seq(2,nrow(tmp2),by=2),]))
+    DT[,FC:=(hap.a/(hap.b+hap.a))/(1-hap.a/(hap.b+hap.a))]
+    if(is.null(y)){
+        if(is.null(counts)){
+        return(DT)
+        } else {
+        DT[,Gene.counts:=as.numeric(t(counts)[-1,])]
+        
+        return(DT)
+    }
+    }
+    gt <- y[,grep("_GT", names(y)),with=F]
+    DT <- cbind(DT,data.table(t(gt)))
+    names(DT)[5:ncol(DT)] <- paste0("rSNP.",y$snp_id)
+    if(is.null(counts)){
+        return(DT)
+    } else {
+        DT[,Gene.counts:=as.numeric(t(counts)[-1,])]
+        return(DT)
+}
+}
+
+#' Get GT of rSNP and recode according to haplotype per individual
+#' 
+#' recodes GT to be tested for association for AS
+#' @param x vector with SNP positions
+#' @param y Object with GT info for rSNPs, make sure positions of the rSNPs of interest are unique and match x, example ouptut of name function of rasqual input
+#' @keywords GT rSNP
+#' @export
+#' @return data table with GT per sample
+#' gt_rSNPs
+
+gt_rSNPs <- function(x,y){
+    sub <- y[POS %in% x,]
+    gt <- grep("_GT",names(sub), value=T)
+    tmp <- sub[,gt,with=F]
+    # recode tmp
+    tmp2 <- copy(tmp)
+    tmp2[tmp2=="0|0"] <- 0
+    tmp2[tmp2=="0|1"] <- 1
+    tmp2[tmp2=="1|0"] <- -1
+    tmp2[tmp2=="1|1"] <- 0
+    return(tmp2)
+}
+ 
+#' Selects SNPs and recode GP to 0-2 scale
+#' 
+#' recodes Genotype probabilities to 0-2 scale for selected SNPs, samples with "_GP" suffix.
+#' @param x vector with SNP positions for a chr
+#' @param y data.table with GP separated by comma (ie 0,0.9,0.1) for each sample, for the chr selected in x input
+#' @param z vector with order fo samples, defaults to NULL
+#' @keywords recode GP rSNP
+#' @export
+#' @return data table with GT per sample
+#' rec_rSNPs
+
+rec_rSNPs <- function(x,y, z=NULL){
+    tmp <- y[POS %in% x,]
+    tmp2 <- tmp[,grep("_GP", names(tmp), value=T), with=F]
+    tmp3 <- lapply(tmp2, function(i) { #recode
+        s <- strsplit(i,split=",")
+        t <- sapply(s, function(k) sum(as.numeric(k[[2]]), 2*as.numeric(k[[3]])))
+        return(t)
+        })
+    tmp[, grep("_GP", names(tmp), value=T) := tmp3]
+    tmp[, grep("_GT", names(tmp), value=T):=NULL]
+    names(tmp) <- gsub("_GP","_GT",names(tmp))
+    if(!is.null(z)) {
+        setcolorder(tmp,c(grep("_GT", names(tmp), invert=T, value=T), paste0(z,"_GT")))
+        }
+    return(tmp)
+}       
+    
+#' Selects SNPs and recode GP to trecase scale: 0 AA, 1 AB, 3 BA, 4 BB.
+#' 
+#' recodes fixed genotypes to trecase scale for selected SNPs, samples with "_GT" suffix.
+#' @param x vector with SNP positions for a chr
+#' @param y data.table with phased GP (0|1) for each sample, for the chr selected in x input
+#' @param z vector with order fo samples, defaults to NULL
+#' @keywords recode GP rSNP trecase
+#' @export
+#' @return data table with recoded GT per sample
+#' rec_trecase_rSNPs
+
+rec_trecase_rSNPs <- function(x,y, z=NULL){
+    tmp <- y[POS %in% x,]
+    tmp2 <- tmp[,grep("_GT", names(tmp), value=T), with=F]
+    #new.names <- gsub("_GT","",names(tmp2))
+    for(i in seq_along(names(tmp2))) { #recode
+        #setkey(tmp2,i)
+        tmp2[get(names(tmp2)[i])=="0|0",names(tmp2)[i]:="0"]
+        tmp2[get(names(tmp2)[i])=="0|1",names(tmp2)[i]:="1"]
+        tmp2[get(names(tmp2)[i])=="1|0",names(tmp2)[i]:="3"]
+        tmp2[get(names(tmp2)[i])=="1|1",names(tmp2)[i]:="4"]
+        tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
+        }
+    tmp[, grep("_GT", names(tmp), value=T) := tmp2]
+    
+    if(!is.null(z)) {
+        setcolorder(tmp,c(grep("_GT", names(tmp), invert=T, value=T), paste0(z,"_GT")))
+        }
+    return(tmp)
+}       
+
+#' Selects SNPs and recode GT to my implementation of trecase scale: 0 AA, 1 AB, 2 BB BA -1 
+#' 
+#' recodes fixed genotypes to my implementation of trecase for selected SNPs, samples with "_GT" suffix.
+#' @param x vector with SNP positions for a chr
+#' @param y data.table with phased GP (0|1) for each sample, for the chr selected in x input
+#' @param z vector with order fo samples, defaults to NULL
+#' @keywords recode GT rSNP m=trecase
+#' @export
+#' @return data table with recoded GT per sample
+#' rec_mytrecase_rSNPs
+
+rec_mytrecase_rSNPs <- function(x,y, z=NULL){
+    tmp <- y[POS %in% x,]
+    tmp2 <- tmp[,grep("_GT", names(tmp), value=T), with=F]
+    #new.names <- gsub("_GT","",names(tmp2))
+    for(i in seq_along(names(tmp2))) { #recode
+        #setkey(tmp2,i)
+        tmp2[get(names(tmp2)[i])=="0|0",names(tmp2)[i]:="0"]
+        tmp2[get(names(tmp2)[i])=="0|1",names(tmp2)[i]:="1"]
+        tmp2[get(names(tmp2)[i])=="1|0",names(tmp2)[i]:="-1"]
+        tmp2[get(names(tmp2)[i])=="1|1",names(tmp2)[i]:="2"]
+        
+        tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
+        }
+    tmp[, grep("_GT", names(tmp), value=T) := tmp2]
+    
+    if(!is.null(z)) {
+        setcolorder(tmp,c(grep("_GT", names(tmp), invert=T, value=T), paste0(z,"_GT")))
+        }
+    return(tmp)
+}       
+
+
+############################### Error distribution after imputation #######
+
+#' Understanding pattern of snps typing errors after imputation
+#' 
+#' counts number of errors per SNP across samples for each type of error (0,1,2)
+#' @param x data table with number of errors for each sample per snp, output from N_error_imp_sample (example in DNA_vs_RNA.R).
+#' @keywords patterns errors imputation
+#' @export
+#' @return data table with number of each type of error per snp
+#' imp_pat_errors
+
+imp_pat_errors<- function(x){
+    n_errors <- x[,grep("N_errors", names(x), value=T),with=F]
+    DT <- data.table(e0=numeric(), e1=numeric(), e2=numeric())
+     for(j in 1:nrow(n_errors)) {
+        e_0 <- sum(n_errors[j,]==0)
+        e_1 <- sum(n_errors[j,]==1)
+        e_2 <- sum(n_errors[j,]==2)
+        DT <- rbindlist(list(DT,data.table(e0=e_0,e1=e_1,e2=e_2)))
+        }
+        return(DT)
+           
+}       
+
+

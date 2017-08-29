@@ -169,8 +169,8 @@ vcf4AS () {
 
 #convert tab files with GT:AS and RSQ fields into vcf: one file per sample  (per chr)
 
-#arg1 path to files
-#arg2 pattern to match
+#arg1 path to files containing tab, vcf header
+#arg2 pattern to match tab files
 
 tab2vcf () {
     cd $1

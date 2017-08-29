@@ -1,0 +1,63 @@
+library(data.table)
+library(rpart)
+library(lattice)
+library(ggplot2)
+library(caret)
+#packages for preprocess
+library(rpart.plot)
+#packages for decision tree
+library(mlbench)
+#package with data sample
+library(tidyr)
+library(rattle)
+library(RColorBrewer)
+library(randomForest)
+library(h2o)
+
+source('/home/ev250/Cincinatti/Functions/various.R')
+
+
+
+#'  check genotype concordance after prediction by prediction output category
+#'
+#' This function allows you to assess concordance in genotype based on a binary output
+#' @param x data table input for making train and test datasets, names as in dna.imp.info.errors from rna.geno.trees.R
+#' @param y data table with predictions and SNP IDs, names as in pred.train in rna.geno.trees.R
+#' @param z vector with names of categories from prediction output
+#' @param w data table with counts for number of errors across all snps and all samples (marginal), example t1 in rna.geno.trees.R, optional
+#' @keywords concordance prediction
+#' @export
+#' @return data table with genotype concordance (and cumulative) when applying machine learning rules
+#' name()
+pred.conc <- function(x,y,z,w=NULL){
+    
+   tmp <- lapply(seq_along(z), function(i) x[rsid_ref_alt %in% y[pred.out==z[i],SNP],grep("N_errors", names(x), value=T),with=F])
+    t <- lapply(seq_along(tmp), function(i) { DT <- data.table(table(rowSums(tmp[[i]])))
+    DT[,Cum:=cumsum(N)*100/sum(N)]
+    setnames(DT, names(DT)[2:3],paste0(names(DT)[2:3],".",z[i]))
+    return(DT)
+    })
+    if(is.null(w)){
+    t2 <- Reduce(function(x,y) merge(x, y, by="V1", all=T), t)
+    t2[,V1:=as.numeric(V1)]
+    setkey(t2,V1)
+    # replace NA in .err with 0 (means 0 snp) and recalculate cum accordingly
+    for(i in seq_along(z)){
+        t2[is.na(get(paste0("N.",z[i]))), paste0("N.", z[i]) :=0]
+        t2[,paste0("Cum.",z[i]):=cumsum(get(paste0("N.",z[i])))*100/sum(get(paste0("N.",z[i])))]
+        }
+        return(t2)
+    } else {
+        t[[3]] <- w
+        t2 <- Reduce(function(x,y) merge(x, y, by="V1", all=T), t)
+        t2[,V1:=as.numeric(V1)]
+        setkey(t2,V1)
+    # replace NA in .err with 0 (means 0 snp) and recalculate cum accordingly
+    for(i in seq_along(z)){
+        t2[is.na(get(paste0("N.",z[i]))), paste0("N.", z[i]) :=0]
+        t2[,paste0("Cum.",z[i]):=cumsum(get(paste0("N.",z[i])))*100/sum(get(paste0("N.",z[i])))]
+    }
+        return(t2)
+        }
+        
+}
