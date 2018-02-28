@@ -10,6 +10,9 @@ library(rasqualTools)
 library(bigvis)
 library(hexbin)
 library(ggrepel)
+library(splitstackshape)
+library("GenomicFeatures")
+library("GenomicAlignments")
 
 ######################## DNA ########################################
 
@@ -750,20 +753,21 @@ rem_genos <- function(file,rna,dp){
 #' This function allows you to get good format for imp2 files with info score >=0.4
 #' @param path path to imp2 file
 #' @param file file name of imputed file
+#' @param sample full path to samples file
 #' @keywords imp2 format
 #' @export
 #' @return data table 
 #' read_imp
-read_imp <- function(file, path='/scratch/ev250/Cincinatti/quant/imputation/imp_full_chr/') {
+read_imp <- function(file, path='/scratch/ev250/Cincinatti/quant/imputation/imp_full_chr/',sample='/scratch/ev250/Cincinatti/quant/imputation/input/star_built37trimmed.imp2.samples') {
     
     temp <- fread(paste0(path, file))
-    samples <- fread('/scratch/ev250/Cincinatti/quant/imputation/input/star_built37trimmed.imp2.samples')
+    samples <- fread(sample)
     samps <- rep(samples$ID_1[2:nrow(samples)],3)
     samps <- samps[ order(match(samps,samples$ID_1[2:nrow(samples)]))]
     names(temp) <- c("imp","rsid_ref_alt","POS","ref","alt" ,paste(samps, 1:3, sep="_"))
     info <- fread(paste0(path,sub("\\.dosage","",file), '_info'), colClasses =list(character=3:10))
-    info <- info[info>=0.4,]
-    temp2 <- temp[rsid_ref_alt %in% info$rs_id,]
+    temp2 <-merge(temp,info[,.(rs_id,info)], by.x="rsid_ref_alt", by.y="rs_id")
+    temp2 <- temp2[info>=0.4,]
     return(temp2) 
 }
 
@@ -772,13 +776,14 @@ read_imp <- function(file, path='/scratch/ev250/Cincinatti/quant/imputation/imp_
 #' This function allows you to get good format for imp2 files, genome wide
 #' @param path path to imp2 files
 #' @param files file names of imputed file
+#' @param sample full path to samples file
 #' @keywords imp2 format
 #' @export
 #' @return named list each element one chr
 #' read_imp_gw
 
-read_imp_gw <- function(path='/scratch/ev250/Cincinatti/quant/imputation/imp_full_chr/',files){
-    imps <- lapply(files,function(i) read_imp(path, file=i))
+read_imp_gw <- function(path='/scratch/ev250/Cincinatti/quant/imputation/imp_full_chr/',files, sample='/scratch/ev250/Cincinatti/quant/imputation/input/star_built37trimmed.imp2.samples'){
+    imps <- lapply(files,function(i) read_imp(path, file=i,sample))
     names(imps) <- paste0("chr",sub(".*\\.","",sub("\\.imp2","",files)))
     return(imps)
 }
@@ -963,11 +968,15 @@ hap_un <- function(file){
 #' @return saves tab delimited files in "path" for RASQUAL input per sample per chr 
 #' DNAvcf4rasqual
 
-DNAvcf4rasqual <- function(path,pattern,chr,DNA){
-    DNA_f <- readRDS(DNA)
-    lapply(chr, function(i) DNAvcf4rasqual_sub(path=path,pattern=pattern,chr=i,DNA_f=DNA_f[[which(names(DNA_f)==i)]]))
-
+DNAvcf4rasqual <- function(path,pattern,chr,DNA=NULL){
+    if(!is.null(DNA)){
+        DNA_f <- readRDS(DNA)
+        lapply(chr, function(i) DNAvcf4rasqual_sub(path=path,pattern=pattern,chr=i,DNA_f=DNA_f[[which(names(DNA_f)==i)]]))
+    } else {
+        lapply(chr, function(i) DNAvcf4rasqual_sub(path=path,pattern=pattern,chr=i))
+    }
 }
+
 
 #' Subfunction to prepare vcf from DNA files with GT:ASE and RSQ fields
 #'
@@ -981,7 +990,7 @@ DNAvcf4rasqual <- function(path,pattern,chr,DNA){
 #' @return saves tab delimited file in path's dir  with RASQUAL formatted input per sample for specified chr
 #' DNAvcf4rasqual_sub
 
-DNAvcf4rasqual_sub <- function(path,pattern,chr,DNA_f) {
+DNAvcf4rasqual_sub <- function(path,pattern,chr,DNA_f=NULL) {
     #open GT files
     setwd(path)
     t_files <- list.files(pattern=paste0(chr,".",pattern))
@@ -1007,23 +1016,25 @@ DNAvcf4rasqual_sub <- function(path,pattern,chr,DNA_f) {
         tabs_AS[[i]][,c('variantID', 'refCount', 'altCount', 'totalCount'):=NULL]
         setcolorder(tabs_AS[[i]], c(names(tabs[[i]])[1:8],"GT","V9"))
         setkey(tabs_AS[[i]], V2)
-}
+     }
 
-     # add info score
-    
+    ## add info score
     for (i in seq_along(tabs_AS)) {
-        #n <- which(names(DNA_f)==pat[[i]][[1]][2])
-    tabs_AS[[i]] <- merge(tabs_AS[[i]], DNA_f[,.(CHROM,POS,REF,ALT,R2)], by.x=paste0("V",c(1:2,4:5)), by.y=c("CHROM","POS", "REF", "ALT" ), all.x=T)
-    tabs_AS[[i]][,V8:=paste0("RSQ=",R2)][,R2:=NULL]
-    setcolorder(tabs_AS[[i]],c(names(tabs[[i]])[1:8],"GT","V9"))
+        if(!is.null(DNA_f)){
+            ##n <- which(names(DNA_f)==pat[[i]][[1]][2])
+            tabs_AS[[i]] <- merge(tabs_AS[[i]], DNA_f[,.(CHROM,POS,REF,ALT,R2)], by.x=paste0("V",c(1:2,4:5)), by.y=c("CHROM","POS", "REF", "ALT" ), all.x=T)
+            tabs_AS[[i]][,V8:=paste0("RSQ=",R2)][,R2:=NULL]
+            setcolorder(tabs_AS[[i]],c(names(tabs[[i]])[1:8],"GT","V9"))
+        }  else {  ## replace GT column with "." so vcf file has an INFO column
+            tabs_AS[[i]][,V8:="."]
+        }
     }
+    
     # save as tab delimed
     names(tabs_AS) <- names(tabs)
     for(i in seq_along(tabs_AS)){
-        write.table(tabs_AS[[i]], file=paste0(names(tabs_AS)[[i]],".for.AS.tab"),row.names=F,col.names=F,quote=F,sep="\t")
-    
+        write.table(tabs_AS[[i]], file=paste0(names(tabs_AS)[[i]],".for.AS.tab"),row.names=F,col.names=F,quote=F,sep="\t")     
     }
-
 }
 
 #' Function to prepare vcf from RNA genotyped files with GT:ASE and RSQ fields
@@ -1204,10 +1215,10 @@ hybridvcf4rasqual_aux<- function(hybrid){
 
 #' fsnp count per gene for rasqual input
 #'
-#' Takes snp coordinates to locate then withing genes
+#' Takes snp coordinates to locate them withing genes
 #' @param x path to input files with snp coordinates, output from bash functions vcf4rasqual or vcf4rasqualg. Default is current directory
 #' @param pat pattern to match input files 
-#' @param exons full path with file name containing exon bounderies for each gene, output from rasqualTools (script input_4_rasqual.R)
+#' @param exons full path with file name containing exon bounderies for each gene, outputfiels from rasqualTools (script input_4_rasqual.R)
 #' @param cis_window length of window to count snps, dafults to 5e5
 #' @param out_path path to output files, defualt is current directory.
 #' @param prefix vector with prefix names for output files (automatically added .txt)
@@ -2142,9 +2153,10 @@ combine_qc <- function(files.p,files.r,xtable=TRUE){
 #' Select longest exons for one gene
 #'
 #' @param exon_pos Data frame with exons (required columns: gene_id, chr, start, end)for one gene only
-#'
 #' @return Data table with ordered longest exons for a gene
 #' @export
+#' longest.exons
+
 longest.exons <- function(exon_pos){
     exon_st <- as.numeric(unlist(strsplit(exon_pos$exon_starts, ",")))
     exon_end <- as.numeric(unlist(strsplit(exon_pos$exon_ends, ",")))
@@ -2167,10 +2179,11 @@ longest.exons <- function(exon_pos){
 #'
 #' @param exon_pos Data frame with exons (required columns: gene_id, chr, start, end)for one gene only
 #' @param snp_coords Data frame with SNP coordinates (required columns: chr, pos, snp_id)
-#' @param cis_window Size of the cis window from both sides of the gene.
 #'
 #' @return Data table with fSNPS
 #' @export
+#' get.f.Snps
+
 get.f.Snps <- function(exon_pos, snp_coords){
     tmp <- longest.exons(exon_pos)
     #get SNPs within exons (fSNP column Yes or No) outside of coding is "No"
@@ -2187,6 +2200,33 @@ get.f.Snps <- function(exon_pos, snp_coords){
 }
 
 
+# FUNCTION TO get fSNPs for one gene
+
+#' Identifies feature SNPs (and cis SNPs, not yet) overlapping a set of exons. Requieres previous selection of longest exons for one gene 
+#'
+#' @param exon_pos Data frame with longest exons (required columns: gene_id, chr, exon_starts, exon_ends)for one gene only, subset by gene of output from format_exons
+#' @param snp_coords Data frame with SNP coordinates (required columns: CHROM, POS, ID)
+#' @return Data table with fSNPS
+#' @export
+#' get.f.Snps2
+
+get.f.Snps2 <- function(exon_pos, snp_coords){
+    	tmp <- exon_pos
+    	#get SNPs within exons 
+	tmp2=snp_coords
+    	setkey(tmp2,CHROM,POS)
+    	DT <- data.table()
+    #For those in exons change to "Yes"
+    for(k in 1:nrow(tmp)){
+        tmp3 <- tmp2[POS >=tmp$exon_starts[k]& POS<=tmp$exon_ends[k], ][,gene_id:=exon_pos$gene_id]
+	DT <- rbind(DT,tmp3)
+        }
+    return(DT)
+}
+
+
+
+
 
 ##########################
 # FROM KAUR rasqual tools
@@ -2200,7 +2240,7 @@ get.f.Snps <- function(exon_pos, snp_coords){
 #' @param snp_coords Data frame with SNP coordinates from a VCF file (required columns: chr, pos, snp_id)
 #' @param cis_window Size of the cis window from both sides of the gene.
 #'
-#' @return Data frame with exon coordinates, cis region coordiantes as well as the number of cis and feature snps.
+#' @return Data frame with exon coordinates, cis region coordinates as well as the number of cis and feature snps.
 #' @export
 #' @importFrom magrittr "%>%"
 countSnpsOverlapingExons2 <- function(gene_metadata, snp_coords, cis_window = 5e5, return_fSNPs = FALSE){
@@ -2468,7 +2508,7 @@ sum.as_fSNPs <- function(x,y=NULL,counts=NULL){
     tmp2 <- apply(tmp,2, function(i) as.numeric(unlist(strsplit(i, ","))))
     
     DT <- data.table(samples=gsub("_AS","",as),hap.a=colSums(tmp2[seq(1,nrow(tmp2),by=2),]),hap.b=colSums(tmp2[seq(2,nrow(tmp2),by=2),]))
-    DT[,FC:=(hap.a/(hap.b+hap.a))/(1-hap.a/(hap.b+hap.a))]
+    DT[,ASE.counts:=(hap.a + hap.b)]
     if(is.null(y)){
         if(is.null(counts)){
         return(DT)
@@ -2488,6 +2528,41 @@ sum.as_fSNPs <- function(x,y=NULL,counts=NULL){
         return(DT)
 }
 }
+
+
+
+#' Get haps of fsnp plus rSNP 
+#' 
+#' extract haps from vcf file for fsnp and 1 rsnp
+#' @param x data table of fsnps, rows fsnps and columns phased GT, plus any additional
+#' @param y rsnp id, id="POS:REF:ALT"
+#' @param z data table or rsnps, rows fsnps and columns phased GT, plus any additional
+#' @keywords sample haps 
+#' @export
+#' @return list with 2 matrices, first for hap1: row samples and each col GT for fsnps and last rsnp
+#' hap_sam
+
+hap_sam <- function(x,y=NULL,z=NULL){
+    gt <- grep("_GT",names(x), value=T)
+    tmp <- x[,gt,with=F]
+    ##get rsnp
+    if(!is.null(y) & !is.null(z)){
+        z[,id:=paste(POS,REF,ALT, sep=":")]
+        rsnp <- z[id==y,gt, with=F]
+        ## add rsnp to fsnps
+        tmp <- rbind(tmp,rsnp)
+    }
+    ## get hap1 
+    tmp1 <- sapply(1:ncol(tmp), function(i) as.numeric(unlist(lapply(strsplit(tmp[[i]], "|"), `[[`, 1))))
+    ## get hap2 
+    tmp2 <- sapply(1:ncol(tmp), function(i) as.numeric(unlist(lapply(strsplit(tmp[[i]], "|"), `[[`, 3))))
+    ## transpose 
+    l <- list(hap1=t(tmp1),hap2=t(tmp2))
+    return(l)
+}
+
+
+
 
 #' Get GT of rSNP and recode according to haplotype per individual
 #' 
@@ -2577,13 +2652,15 @@ rec_trecase_rSNPs <- function(x,y, z=NULL){
 #' @param x vector with SNP positions for a chr
 #' @param y data.table with phased GP (0|1) for each sample, for the chr selected in x input
 #' @param z vector with order fo samples, defaults to NULL
+#' @param recode whether not to recode, defaults to yes
 #' @keywords recode GT rSNP m=trecase
 #' @export
 #' @return data table with recoded GT per sample
 #' rec_mytrecase_rSNPs
 
-rec_mytrecase_rSNPs <- function(x,y, z=NULL){
+rec_mytrecase_rSNPs <- function(x,y, z=NULL, recode="yes"){
     tmp <- y[POS %in% x,]
+    if(recode=="yes") {
     tmp2 <- tmp[,grep("_GT", names(tmp), value=T), with=F]
     #new.names <- gsub("_GT","",names(tmp2))
     for(i in seq_along(names(tmp2))) { #recode
@@ -2592,11 +2669,12 @@ rec_mytrecase_rSNPs <- function(x,y, z=NULL){
         tmp2[get(names(tmp2)[i])=="0|1",names(tmp2)[i]:="1"]
         tmp2[get(names(tmp2)[i])=="1|0",names(tmp2)[i]:="-1"]
         tmp2[get(names(tmp2)[i])=="1|1",names(tmp2)[i]:="2"]
+        tmp2[get(names(tmp2)[i])==".",names(tmp2)[i]:="NA"]
         
         tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
         }
     tmp[, grep("_GT", names(tmp), value=T) := tmp2]
-    
+    }
     if(!is.null(z)) {
         setcolorder(tmp,c(grep("_GT", names(tmp), invert=T, value=T), paste0(z,"_GT")))
         }
@@ -2628,4 +2706,119 @@ imp_pat_errors<- function(x){
            
 }       
 
+#' missing values for RNA genotypes setting a cut-off for genotyping probabilities, defaults to shapeit
+#' 
+#' counts number of SNPs per sample with missing value after applying a cut-off to their genotyping probability
+#' @param DT data table with genotyping probabilities (dna.imp.info.errors, example in DNA_vs_RNA.R).
+#' @param x scalar, cut-off for considering genotypes as missing values
+#' @keywords missing genotypes
+#' @export
+#' @return data table with number of missing genotypes per snp per sample
+#' miss_imp
 
+mis_imp<- function(DT,x=0.9){
+    #select columns with geno prob information 
+    tmp <- DT[,sort(sapply(c("_1","_2","_3"), function(i) grep(i,names(DT)))),with=F]
+    non.miss <- c()
+    for(i in seq(1,ncol(tmp),by=3)){
+        non.miss <- c(non.miss,length(unlist(apply(tmp[,i:(i+2), with=F],2, function(j) which(j>=x)))))
+        
+    }
+    tmp2 <- data.table(sample=unique(gsub("_.*","",names(tmp))),non.missing=non.miss)
+    tmp2[,missing:=nrow(DT)-non.missing][,per.miss:=missing*100/nrow(DT)]   
+    return(tmp2)    
+           
+}      
+
+#' missing values for DNA genotypes setting a cut-off for genotyping probabilities, defaults to shapeit
+#' 
+#' counts number of SNPs per sample with missing value after applying a cut-off to their genotyping probability
+#' @param DT data table with genotyping probabilities (dna.imp.info.errors example in DNA_vs_RNA.R).
+#' @param x vector of cut-offs for considering genotypes as missing values
+#' @keywords missing genotypes
+#' @export
+#' @return data table with number of missing genotypes per snp per sample
+#' miss_dna
+
+mis_dna<- function(DT,x=0.9){
+    #select columns with geno prob information 
+    tmp <- DT[, grep("GP",names(DT)),with=F]
+    #split by "," for input for mis_imp
+    tmp <- cSplit(tmp,names(tmp), ",")
+    names(tmp) <- sub("[0-9]*_","",names(tmp))
+    tmp2 <- lapply(x, function(i) mis_imp(tmp,i))
+    return(tmp2)        
+}      
+
+
+#' Get counts per gene from bam files and gtf file
+#' 
+#' use STAR bam output to get a DT with raw counts per gene
+#' @param gtf full name of gtf file for a particular built
+#' @param path path to dir with one dir per sample which contains STAR bam output
+#' @param samples vector with the samples name as in each dir containing bam files
+#' @param bam.name name of bam file, same for all samples as output from STAR, defaults to STAR name
+#' @param mode="Union", input for summarizeOverlaps, 
+#' @param singleEnd=FALSE, input for summarizeOverlaps, defaults pair end
+#' @param ignore.strand=TRUE, summarizeOverlaps
+#' @keywords missing genotypes
+#' @export
+#' @return data table with number of missing genotypes per snp per sample
+#' miss_dna
+
+counts_sample <- function(gtf,path,samples,bam.name="Aligned.sortedByCoord.out.bam", mode="Union",singleEnd=FALSE, ignore.strand=TRUE){
+    ebg <- gtf2ebg(gtf_file)
+    setwd(path)
+    no_cores <- detectCores() - 1
+    cl <- makeCluster(no_cores, type="FORK")
+    ##couns per sample
+    counts <- perLapply(cl,samples, function(i) counts_sample_sub(ebg,samp=i,bam.name="Aligned.sortedByCoord.out.bam",mode="Union",singleEnd=FALSE, ignore.strand=TRUE))
+    stopCluster(cl)
+    merged<-Reduce(function(...) merge(...,by="gene_id"), counts)
+    return(merged)
+}
+
+
+#' Get exons per  gene from a gtf file
+#' 
+#' get exons per gene from gtf file to help calculating counts per gene
+#' @param gtf full name of gtf file for a particular built
+#' @param mode="Union", input for summarizeOverlaps, 
+#' @param singleEnd=FALSE, input for summarizeOverlaps, defaults pair end
+#' @param ignore.strand=TRUE, summarizeOverlaps
+#' @keywords exons per gene
+#' @export
+#' @return object class GRangesList from GenomicRanges package
+#' gtf2ebg
+
+gtf2ebg <- function(gtf_file){
+    txdb <- makeTxDbFromGFF(gtf_file, format="gtf", circ_seqs=character())
+    ebg<-exonsBy(txdb, by="gene")
+    return(ebg)
+}
+
+
+#' Get counts per gene from bam files and gtf file
+#' 
+#' use STAR bam output to get a DT with raw counts per gene
+#' @param egb exons by gene, outout from egb
+#' @param samp name of dir with STAR bam file
+#' @param bam.name name of bam file, same for all samples as output from STAR, defaults to STAR name
+#' @keywords missing genotypes
+#' @export
+#' @return data table with number of missing genotypes per snp per sample
+#' miss_dna
+
+counts_sample_sub<- function(ebg,samp,bam.name="Aligned.sortedByCoord.out.bam",mode="Union",singleEnd=FALSE, ignore.strand=TRUE){
+   
+    filename <- file.path(samp,bam.name)
+    bamfiles <- BamFileList(filename, yieldSize=2000000)
+    se <- summarizeOverlaps(features=ebg, reads=bamfiles,
+                        mode=mode,
+                        singleEnd=singleEnd,
+                        ignore.strand=ignore.strand)
+    temp <- data.table(assays(se)$counts, keep.rownames=T)
+    names(temp) <- c("gene_id", samp)
+    ##cat("sample",samp)
+    return(temp)
+}

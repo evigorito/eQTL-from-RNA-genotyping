@@ -17,7 +17,6 @@ library(h2o)
 source('/home/ev250/Cincinatti/Functions/various.R')
 
 
-
 #'  check genotype concordance after prediction by prediction output category
 #'
 #' This function allows you to assess concordance in genotype based on a binary output
@@ -28,6 +27,7 @@ source('/home/ev250/Cincinatti/Functions/various.R')
 #' @keywords concordance prediction
 #' @export
 #' @return data table with genotype concordance (and cumulative) when applying machine learning rules
+#' pred.conc()
 #' 
 pred.conc <- function(x,y,z,w=NULL){
     
@@ -70,7 +70,8 @@ pred.conc <- function(x,y,z,w=NULL){
 #' @keywords concordance prediction per sample
 #' @export
 #' @return list of data tables with % of genotype concordance per sample 
-#'
+#'pred.conc.per()
+
 pred.conc.per <- function(x,y=NULL){
     if(is.null(y)){
         DT <- x[,grep("N_errors", names(x)),with=F]
@@ -96,3 +97,4 @@ pred.conc.per <- function(x,y=NULL){
     return(conc)
 }
 }
+
