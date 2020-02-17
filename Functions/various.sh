@@ -225,6 +225,8 @@ mergevcf () {
 }
 
 
+
+
 #extract samples from multiple vcfs
 
 #arg1 path to vcf files

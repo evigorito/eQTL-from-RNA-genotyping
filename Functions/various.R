@@ -1,4 +1,4 @@
-#Functions
+##Functions
 
 library(data.table)
 library(biomaRt)
@@ -7,10 +7,10 @@ library(dplyr)
 library(tidyr)
 library(parallel)
 library(rasqualTools)
-library(bigvis)
+##library(bigvis,lib.loc="/home/ev250/R/x86_64-pc-linux-gnu-library/3.3")
 library(hexbin)
 library(ggrepel)
-library(splitstackshape)
+##library(splitstackshape,lib.loc="/home/ev250/R/x86_64-pc-linux-gnu-library/3.3")
 library("GenomicFeatures")
 library("GenomicAlignments")
 
@@ -62,9 +62,9 @@ name_list <- function(path=NULL, pattern=NULL, name){
 }
 
 
-#' format annotation field 
+#' format annotation field, 
 #'
-#' This function allows you to get simplified annotation from vcf to text conversion.
+#' This function allows you to get simplified annotation from vcf to text conversion. Not sure if "sim" covers all possible terms that may need simplification
 #' @param DT data table with vcf txt, output from name
 #' @keywords annotation format
 #' @export
@@ -73,14 +73,32 @@ name_list <- function(path=NULL, pattern=NULL, name){
 
 ann_vcf <- function(DT){
     s <- strsplit(DT$ANN,",")
-    temp <- lapply(s, function(i) unique(do.call(rbind,strsplit(i, "|", fixed=T))[,2]))
-    #create hierarchy of terms
+    temp <- lapply(s, function(i) unique(sapply(strsplit(i, "|", fixed=T), `[[`,2)))
+    
+    ## simplify terms
     terms <-  data.table(ANN=unique(unlist(temp)))
-    terms[,ann.sum:=c(rep("proximal",2),"intergenic","intronic","exonic","exonic","UTR","exonic","intronic","unknown","UTR","exonic","exonic","intronic","proximal","exonic","exonic","exonic","intronic","intronic",rep("exonic",6),"intronic")]
-    #hierarchy
-    h <- c("exonic","UTR","intronic","proximal","intergenic","unknown")
-    temp2 <- lapply(temp, function(i) unique(terms[ANN %in% i,ann.sum])[order(h)][1])
-    DT[,ANN:=unlist(temp2)]
+    
+    sim <- data.table(pat=c("start,stop,missense,synonymous,structural_interaction,initiator_codon_variant,protein_protein_contact", "UTR","upstream,downstream,TF,non_coding_transcript_exon_variant", "intron,splice","intergenic","intragenic","sequence_feature"), term=c("exonic","UTR","proximal","intronic", "intergenic","intragenic","unknown"))
+    pat.vector <- unlist(lapply(sim$pat, strsplit, split=","))
+
+    ## apply simp to ANN
+    
+     
+    index <- lapply(terms$ANN, function(i) lapply(pat.vector, function(j)grep(j,i,value=T)))
+    index <- lapply(index, setNames, pat.vector)
+    index <- unlist(lapply(index, function(i) i[sapply(i,length)>0]))
+    names(index) <- sapply(names(index), function(i) sim[grep(i,sim$pat),term])
+
+    ## apply hierarchy in index, only select one keyword for annotation following order in ann$term
+    DT2 <- unique(data.table(ann=index, simp=names(index)))
+    DT2 <- DT2[, simp[order(match(simp,sim$term))], by=ann]
+    
+    ## select first row for each ann
+    terms[,ann.simp:=DT2[,.SD[1], by=ann][,V1]]
+   
+    temp2 <- sapply(temp, function(i) unique(terms[ANN %in% i,ann.simp])[order(match(unique(terms[ANN %in% i,ann.simp]), sim$term))][1])
+    
+    DT[,ANN:=temp2]
    
         return(DT)
 }
@@ -180,16 +198,25 @@ snps_gw<- function(list, xtab=NULL, cap=NULL){
 #' @param dna data table with DNA info, one chromosome
 #' @param rna data table with RNA data (all chrs)
 #' @param chr chromosome to subset
+#' @param names whether sample names are different in RNA and DNA, defaults to Cincinatti 
 #' @keywords common variants RNA DNA
 #' @export
 #' @return data table containing variants genotyped commonly by DNA and RNA, indicating concordance based on same genotype.
 #' convert ()
-convert <- function(dna,rna, chr){
+convert <- function(dna,rna, chr, names=NULL){
     DT <- merge(rna[CHROM==chr,][,CHROM:=as.numeric(CHROM)], dna, by=c("CHROM","POS","REF","ALT"), suffixes=c("_RNA","_DNA"))
 
     dna_GT<-grep("GT", names(dna), value=TRUE)
-    rna_GT<-sub("[0-9]*_","",dna_GT)
-    prefix <- sub("_GT","",rna_GT)
+    if(is.null(names)){
+        rna_GT<-sub("[0-9]*_","",dna_GT)
+        prefix <- sub("_GT","",rna_GT)
+    } else {
+        prefix <- paste0(dna_GT)  ## sample
+        rna_GT <- paste0(dna_GT,"_RNA")  ## rna GTs      
+        dna_GT <- paste0(dna_GT,"_DNA")  ## dna GTs
+    }  
+    
+    
     #cols<-paste0(cols_pre, "_GT")
 for(i in 1:length(prefix)){
 	DT[,paste0(prefix[i],"_Concordance"):="Discordant"]
@@ -216,12 +243,13 @@ return(DT)
 #' @param dna_rna_10 data table with DNA and RNA info, one chromosome, output from convert function
 #' @param format if not NULL gives output formatted for table
 #' @param col variable to stratify results on (default null).
+#' @param names whether samples names are the same in dna and rna, defaults to null to keep consistency of cincinatty samples
 #' @keywords common variants RNA DNA
 #' @export
 #' @return data table containing variants genotyped commonly by DNA and RNA, indicating concordance based on same genotype indicating 0,1 or 2 errors of RNA relative to DNA
 #' N_error ()
-N_error <- function(dna_rna_10,format=NULL,col=NULL) {
-        sum_errors <- N_error_sub(dna_rna_10)
+N_error <- function(dna_rna_10,format=NULL,col=NULL,names=NULL) {
+        sum_errors <- N_error_sub(dna_rna_10, names)
         temp1 <- N_error_sub2(sum_errors)
       if(is.null(col)==TRUE){  
         return(temp1)
@@ -229,10 +257,10 @@ N_error <- function(dna_rna_10,format=NULL,col=NULL) {
         u <- unique(unlist(dna_rna_10[,col, with=F]))
         temp <- lapply(u, function(i) dna_rna_10[get(col)==i,])
         names(temp) <- u
-        summ_errors_l <- lapply(temp,N_error_sub)
+        sum_errors_l <- lapply(temp,N_error_sub)
         temp2 <- lapply(sum_errors_l, N_error_sub2)
         temp2 <- Reduce(function(...) merge(...,by="Errors", suffixes=paste0("_",u)),temp2)
-       temp2 <- merge(temp2,temp1, by="Errors", suffixes=c(paste0("_",u[length(u)]),""))
+        temp2 <- merge(temp2,temp1, by="Errors", suffixes=c(paste0("_",u[length(u)]),""))
         return(temp2)
     }
 }
@@ -241,27 +269,28 @@ N_error <- function(dna_rna_10,format=NULL,col=NULL) {
 #'
 #' This function allows you to: summarize errors across samples per chr
 #' @param dna_rna_10 data table with DNA and RNA info, one chromosome
+#' @param names whether samples names are the same in dna and rna, defaults to null to keep consistency of cincinatty samples
 #' @keywords common variants RNA DNA
 #' @export
 #' @return data table containing variants genotyped commonly by DNA and RNA, indicating concordance based on same genotype indicating 0,1 or 2 errors of RNA relative to DNA
 #' N_error_sub ()
-    N_error_sub <- function(dna_rna_10){
- samples <- gsub("_Concordance","",grep("_Concordance",names(dna_rna_10), value=T))
-    DT<-data.table(Errors=c(0,1,2,NA))
-    
-    for (i in seq_along(samples)) {
-    cols<-paste0(samples, "_GT")
-    if(length(unique(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))]))==4){
-                  DT[,samples[i]:=as.numeric(data.table(table(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))], useNA="always"))$N)]
-              } else{
-                  w <- which(DT$Errors %in% unique(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))]))
-                  DT[,samples[i]:=0]
-                  DT[w,samples[i]:=as.numeric(data.table(table(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))], useNA="always"))$N)]
-              }
-    }
- return(DT)
+    N_error_sub <- function(dna_rna_10,names=NULL){
+        samples <- gsub("_Concordance","",grep("_Concordance",names(dna_rna_10), value=T))
+        DT<-data.table(Errors=c(0,1,2,NA))
+        cols<-paste0(samples, "_GT")
+        for (i in seq_along(samples)) {
+            
+            if(length(unique(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))]))==4){
+                DT[,samples[i]:=as.numeric(data.table(table(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))], useNA="always"))$N)]
+            } else{
+                w <- which(DT$Errors %in% unique(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))]))
+                DT[,samples[i]:=0]
+                DT[w,samples[i]:=as.numeric(data.table(table(dna_rna_10[get(cols[i])!=".",get(paste0(samples[i],"_N_errors"))], useNA="always"))$N)]
+            }
+        }
+        return(DT)
 
-}
+    }
         
 #' subfunction 2 for get N-errors per sample for a chr
 #'
@@ -275,13 +304,14 @@ N_error <- function(dna_rna_10,format=NULL,col=NULL) {
 
 N_error_sub2 <- function(DT, format=NULL) {
 sum_errors<-data.table(Errors=c(0,1,2,NA), Mean=round(apply(DT[,2:ncol(DT)],1,mean)), SD=round(apply(DT[,2:ncol(DT)],1,sd)))
-sum_errors[,Pct:=round(Mean*100/sum(Mean[1:3]),2)]
+sum_errors[1:3,Pct:=round(Mean*100/sum(Mean[1:3]),2)]
+
 
     if(is.null(format)==TRUE){
         return(sum_errors[1:3,])
         } else {
     sum_errors[,`Mean (SD)`:=paste0(Mean," (",SD,")")]
-sum_errors[,Mean:=NULL][,SD:=NULL]
+    sum_errors[,Mean:=NULL][,SD:=NULL]
     setcolorder(sum_errors, c("Errors","Mean (SD)","Pct"))
     return(sum_errors[1:3,])
     
@@ -1247,20 +1277,26 @@ snp_coord <-  function(x=".",pat,exons, cis_window=5e5, out_path=".", prefix){
 #'
 #' Selects and format rasqual output
 #' @param x path to file with rasqual output
+#' @param header full name to file with rasqual col names
 #' @param top.hits whether to limit results to strongest associated snp per gene or not
 #' @keywords format rasqual output
 #' @export
 #' @return data table with rasqual formatted output
-#' format_rasqual
+#' format_rasqual()
 
-format_rasqual <-  function(x,top.hits=c("yes","no")) {
+format_rasqual <-  function(x,header=NULL, top.hits=c("yes","no")) {
     temp <- fread(x)
-    names(temp) <- fread('/mrc-bsu/scratch/ev250/Cincinatti/quant/RASQUAL/output/names_rasqual.txt', header=F)$V1
+    if(is.null(header)){
+        names(temp) <- fread('/mrc-bsu/scratch/ev250/Cincinatti/quant/RASQUAL/output/names_rasqual.txt', header=F)$V1
+    } else {
+        names(temp) <- fread(header, header=F)$V1
+    }
+    
     #convert effect size to fold change
     temp[,Effect_size:=Effect_size/(1-Effect_size)]
     setnames(temp,"Effect_size","Fold_change")
     #add p value
-    temp[, p:=pchisq(chi_square, df = 1, lower = F)]
+    temp[, p:=pchisq(chi_square, df = 1, lower.tail = F)]
     # correct by MT (number of tested reg snps)
     temp[,p_adj:=p*r_SNPs][p_adj>1, p_adj:=1]
     #select for each gene the SNP with min p_adj, also some entries have 0 tested_SNPs, remove:
@@ -1269,13 +1305,13 @@ format_rasqual <-  function(x,top.hits=c("yes","no")) {
     top.hits <- match.arg(top.hits)
     if(top.hits=="yes") {
 
-    DT <- temp[,.SD[1], by=gene_id]
-    setkey(DT,p_adj)
-    DT[, FDR:=p.adjust(p_adj,method="fdr")]
-    return(DT)
+        DT <- temp[,.SD[1], by=gene_id]
+        setkey(DT,p_adj)
+        DT[, FDR:=p.adjust(p_adj,method="fdr")]
+        return(DT)
     } else {
 	return(temp)
-}
+    }
 
 }
 
@@ -1303,7 +1339,7 @@ format_rasqual_gw <-  function(x,pattern ,top.hits=c("yes","no"), failed=TRUE){
     } else {
         return(tmp2)
   
-}
+    }
 }
 
 #' Select common gene-SNP pairs between DNA and RNA and format table
@@ -2211,16 +2247,16 @@ get.f.Snps <- function(exon_pos, snp_coords){
 #' get.f.Snps2
 
 get.f.Snps2 <- function(exon_pos, snp_coords){
-    	tmp <- exon_pos
-    	#get SNPs within exons 
-	tmp2=snp_coords
-    	setkey(tmp2,CHROM,POS)
-    	DT <- data.table()
-    #For those in exons change to "Yes"
+    tmp <- exon_pos
+    ##get SNPs within exons 
+    tmp2=snp_coords
+    setkey(tmp2,CHROM,POS)
+    DT <- data.table()
+    ##For those in exons change to "Yes"
     for(k in 1:nrow(tmp)){
         tmp3 <- tmp2[POS >=tmp$exon_starts[k]& POS<=tmp$exon_ends[k], ][,gene_id:=exon_pos$gene_id]
 	DT <- rbind(DT,tmp3)
-        }
+    }
     return(DT)
 }
 
@@ -2561,6 +2597,49 @@ hap_sam <- function(x,y=NULL,z=NULL){
     return(l)
 }
 
+#' Get haps of fsnp plus rSNP, improved for more consistent output
+#' 
+#' extract haps from vcf file for fsnps and 1 rsnp
+#' @param x data table of fsnps, rows fsnps and columns phased GT, plus any additional
+#' @param w sample names, default to NULL as can be deduced from x
+#' @param y rsnp id, id="POS:REF:ALT"
+#' @param z data table or rsnps, rows fsnps and columns phased GT, plus any additional
+#' @keywords sample haps 
+#' @export
+#' @return list with 2 matrices, first for hap1: row samples and each col GT for fsnps and last rsnp
+#' hap_sam2
+
+hap_sam2 <- function(x,w=NULL,y=NULL,z=NULL){
+    
+    gt <- grep("_GT",names(x), value=T)
+    tmp <- x[,gt,with=F]
+    ##get rsnp
+    if(!is.null(y) & !is.null(z)){
+        z[,id:=paste(POS,REF,ALT, sep=":")]
+        rsnp <- z[id==y,gt, with=F]
+        ## add rsnp to fsnps
+        tmp <- rbind(tmp,rsnp)
+    }
+    ## get hap1 
+    tmp1 <- sapply(1:ncol(tmp), function(i) as.numeric(unlist(lapply(strsplit(tmp[[i]], "|"), `[[`, 1))))
+    ## get hap2 
+    tmp2 <- sapply(1:ncol(tmp), function(i) as.numeric(unlist(lapply(strsplit(tmp[[i]], "|"), `[[`, 3))))
+
+    if(ncol(tmp) >1 & !is.matrix(tmp1)){
+        l <- lapply(list(tmp1,tmp2), function(i) matrix(i,ncol=1))
+        names(l) <- c("hap1","hap2")
+    } else {
+        ## transpose 
+        l <- list(hap1=t(tmp1),hap2=t(tmp2))
+    }
+    if(is.null(w)){
+        w <- gsub("_GT","",gt)
+    }
+    ## name samples
+    l <- lapply(l,function(i) {row.names(i)=w; return(i)})
+    
+    return(l)
+}
 
 
 
@@ -2661,26 +2740,60 @@ rec_trecase_rSNPs <- function(x,y, z=NULL){
 rec_mytrecase_rSNPs <- function(x,y, z=NULL, recode="yes"){
     tmp <- y[POS %in% x,]
     if(recode=="yes") {
-    tmp2 <- tmp[,grep("_GT", names(tmp), value=T), with=F]
-    #new.names <- gsub("_GT","",names(tmp2))
-    for(i in seq_along(names(tmp2))) { #recode
-        #setkey(tmp2,i)
-        tmp2[get(names(tmp2)[i])=="0|0",names(tmp2)[i]:="0"]
-        tmp2[get(names(tmp2)[i])=="0|1",names(tmp2)[i]:="1"]
-        tmp2[get(names(tmp2)[i])=="1|0",names(tmp2)[i]:="-1"]
-        tmp2[get(names(tmp2)[i])=="1|1",names(tmp2)[i]:="2"]
-        tmp2[get(names(tmp2)[i])==".",names(tmp2)[i]:="NA"]
-        
-        tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
+        tmp2 <- tmp[,grep("_GT", names(tmp), value=T), with=F]
+                                        #new.names <- gsub("_GT","",names(tmp2))
+        for(i in seq_along(names(tmp2))) { #recode
+                                        #setkey(tmp2,i)
+            tmp2[get(names(tmp2)[i])=="0|0",names(tmp2)[i]:="0"]
+            tmp2[get(names(tmp2)[i])=="0|1",names(tmp2)[i]:="1"]
+            tmp2[get(names(tmp2)[i])=="1|0",names(tmp2)[i]:="-1"]
+            tmp2[get(names(tmp2)[i])=="1|1",names(tmp2)[i]:="2"]
+            tmp2[get(names(tmp2)[i])==".",names(tmp2)[i]:=NA]
+            tmp2[get(names(tmp2)[i])=="./.",names(tmp2)[i]:=NA]
+            
+            tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
         }
-    tmp[, grep("_GT", names(tmp), value=T) := tmp2]
+        tmp[, grep("_GT", names(tmp), value=T) := tmp2]
     }
     if(!is.null(z)) {
         setcolorder(tmp,c(grep("_GT", names(tmp), invert=T, value=T), paste0(z,"_GT")))
-        }
+    }
     return(tmp)
 }       
 
+
+#' Recode phased or unphased GT to additive scale: 0 AA, 1 AB, 2 BB 
+#' 
+#' recodes fixed genotypes,  samples with "_GT" suffix.
+#' @param DT data.table with phased GP (0|1) or unphased (0/1) for each sample, for the chr selected in x input
+#' @param z vector with order fo samples, defaults to NULL
+#' @keywords recode GT rSNP additive
+#' @export
+#' @return data table with recoded GT per sample
+#' rec_add()
+
+rec_add <- function(DT, z=NULL){
+    
+    tmp2 <- DT[,grep("_GT", names(DT), value=T), with=F]
+                                        
+    for(i in seq_along(names(tmp2))) { #recode
+        n <- names(tmp2)[i]
+        tmp2[grep("0[/:|]0",get(n)) ,names(tmp2)[i]:="0"]
+        tmp2[grep("0[/:|]1", get(n)), names(tmp2)[i]:="1"]
+        tmp2[ grep("1[/:|]0", get(n)), names(tmp2)[i]:="1"]
+        tmp2[grep("1[/:|]1",get(n)), names(tmp2)[i]:="2"]
+        tmp2[get(n)==".",names(tmp2)[i]:=NA]
+        tmp2[get(n)=="./.",names(tmp2)[i]:=NA]
+        
+        tmp2[,names(tmp2)[i]:=as.numeric(get(names(tmp2)[i]))]
+    }
+    DT[, grep("_GT", names(DT), value=T) := tmp2]
+    
+    if(!is.null(z)) {
+        setcolorder(DT,c(grep("_GT", names(DT), invert=T, value=T), paste0(z,"_GT")))
+    }
+    return(DT)
+}     
 
 ############################### Error distribution after imputation #######
 
@@ -2783,9 +2896,6 @@ counts_sample <- function(gtf,path,samples,bam.name="Aligned.sortedByCoord.out.b
 #' 
 #' get exons per gene from gtf file to help calculating counts per gene
 #' @param gtf full name of gtf file for a particular built
-#' @param mode="Union", input for summarizeOverlaps, 
-#' @param singleEnd=FALSE, input for summarizeOverlaps, defaults pair end
-#' @param ignore.strand=TRUE, summarizeOverlaps
 #' @keywords exons per gene
 #' @export
 #' @return object class GRangesList from GenomicRanges package
@@ -2804,6 +2914,9 @@ gtf2ebg <- function(gtf_file){
 #' @param egb exons by gene, outout from egb
 #' @param samp name of dir with STAR bam file
 #' @param bam.name name of bam file, same for all samples as output from STAR, defaults to STAR name
+#' @param mode="Union", input for summarizeOverlaps, 
+#' @param singleEnd=FALSE, input for summarizeOverlaps, defaults pair end
+#' @param ignore.strand=TRUE, summarizeOverlaps
 #' @keywords missing genotypes
 #' @export
 #' @return data table with number of missing genotypes per snp per sample
